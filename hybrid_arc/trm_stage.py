@@ -7,7 +7,6 @@ Requires ``TRM`` on ``sys.path`` (see ``run_local`` / ``python -m hybrid_arc.run
 
 from __future__ import annotations
 
-import copy
 import importlib.util
 import json
 import os
@@ -344,8 +343,17 @@ def run_hybrid_eval(
 
             if config.ema and ema_helper is not None:
                 print("SWITCH TO EMA")
-                train_state_eval = copy.deepcopy(train_state)
-                train_state_eval.model = ema_helper.ema_copy(train_state_eval.model)
+                # Do not deepcopy(train_state): ``carry`` can hold non-leaf tensors from
+                # training; PyTorch rejects deepcopying them. Eval ignores ``carry`` and
+                # rebuilds it per batch via ``initial_carry``.
+                train_state_eval = eak.TrainState(
+                    model=ema_helper.ema_copy(train_state.model),
+                    optimizers=train_state.optimizers,
+                    optimizer_lrs=train_state.optimizer_lrs,
+                    carry=None,
+                    step=train_state.step,
+                    total_steps=train_state.total_steps,
+                )
             else:
                 train_state_eval = train_state
             train_state_eval.model.eval()
