@@ -241,17 +241,26 @@ def save_train_state(config: PretrainConfig, train_state: TrainState):
     torch.save(train_state.model.state_dict(), os.path.join(config.checkpoint_path, f"step_{train_state.step}"))
 
 
+def _normalize_torch_compile_state_dict_keys(state_dict: dict) -> dict:
+    """Strip ``_orig_mod.`` prefix saved by ``torch.compile`` so weights load into a fresh compiled module."""
+    prefix = "_orig_mod."
+    if not any(k.startswith(prefix) for k in state_dict):
+        return state_dict
+    return {k[len(prefix):] if k.startswith(prefix) else k: v for k, v in state_dict.items()}
+
+
 def load_checkpoint(model: nn.Module, config: PretrainConfig):
     if config.load_checkpoint is not None:
         print(f"Loading checkpoint {config.load_checkpoint}")
 
         # Load state dict
         state_dict = torch.load(config.load_checkpoint, map_location="cuda")
+        state_dict = _normalize_torch_compile_state_dict_keys(state_dict)
 
         # Resize and reset puzzle emb if needed
-        puzzle_emb_name = "_orig_mod.model.inner.puzzle_emb.weights"
+        puzzle_emb_name = next((k for k in state_dict if k.endswith("puzzle_emb.weights")), None)
         expected_shape: torch.Size = model.model.puzzle_emb.weights.shape  # type: ignore
-        if puzzle_emb_name in state_dict:
+        if puzzle_emb_name is not None:
             puzzle_emb = state_dict[puzzle_emb_name]
             if puzzle_emb.shape != expected_shape:
                 print(f"Resetting puzzle embedding as shape is different. Found {puzzle_emb.shape}, Expected {expected_shape}")
