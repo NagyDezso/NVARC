@@ -1,11 +1,13 @@
 """
-Load TRM + ACT head, optionally patch inner for ``z_H`` seeding, run test inference.
+Load TRM + ACT head, optionally patch inner for ``z_H`` seeding, train then test (same
+control flow as ``TRM/eval-arc-k-10.py`` ``launch()``).
 
 Requires ``TRM`` on ``sys.path`` (see ``run_local`` / ``python -m hybrid_arc.run_local``).
 """
 
 from __future__ import annotations
 
+import copy
 import importlib.util
 import json
 import os
@@ -14,6 +16,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 import torch
+import tqdm
 from omegaconf import DictConfig, OmegaConf
 
 from .arc_tokenize import batch_y_prior_tokens
@@ -141,15 +144,16 @@ def evaluate_with_z_h_seed(
             metric_values[set_id] += torch.stack([metrics[k] for k in metric_keys])
             del metrics
 
-        save_preds = {k: torch.cat(v, dim=0) for k, v in save_preds.items()}
+        save_preds_stacked = {k: torch.cat(v, dim=0) for k, v in save_preds.items()}
+        del save_preds
 
-        if config.checkpoint_path is not None and len(save_preds):
+        if config.checkpoint_path is not None and len(save_preds_stacked):
             os.makedirs(os.path.dirname(config.checkpoint_path), exist_ok=True)
             torch.save(
-                save_preds,
+                save_preds_stacked,
                 os.path.join(config.checkpoint_path, f"step_{train_state.step}_all_preds.{rank}"),
             )
-        del save_preds
+        del save_preds_stacked
 
         if metric_values is not None:
             if world_size > 1:
@@ -205,11 +209,19 @@ def run_hybrid_eval(
     prior_batch_fn: Optional[Callable[[Dict[str, torch.Tensor], List[str]], List[Optional[Any]]]],
     seed_first_step_only: bool = True,
     data_dir_for_identifiers: Optional[Path] = None,
+    smoke_train_batches: Optional[int] = None,
+    smoke_skip_eval: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """
-    End-to-end hybrid eval: compose Hydra config, build loaders, load weights, patch inner.
+    Same outer loop as ``eval-arc-k-10.py`` ``launch()`` (train → eval, EMA, checkpoints),
+    with test-time ``evaluate_with_z_h_seed`` when ``use_z_h_seed`` else stock ``evaluate``.
+
+    ``smoke_train_batches``: if set, stop the inner training loop after this many optimizer
+    steps (one epoch can otherwise be thousands of batches).
+
+    ``smoke_skip_eval``: if True, still run the EMA / ``train_state_eval`` setup when
+    applicable, but skip ``evaluate`` / checkpoint I/O (fast sanity check).
     """
-    os.environ.setdefault("DISABLE_COMPILE", "1")
     trm_root = trm_root.resolve()
     if str(trm_root) not in sys.path:
         sys.path.insert(0, str(trm_root))
@@ -222,32 +234,44 @@ def run_hybrid_eval(
     WORLD_SIZE = 1
     CPU_PROCESS_GROUP = None
 
-    _train_loader, train_metadata = eak.create_dataloader(
+    train_epochs_per_iter = config.eval_interval if config.eval_interval is not None else config.epochs
+    total_iters = config.epochs // train_epochs_per_iter
+    assert config.epochs % train_epochs_per_iter == 0, "Eval interval must be a divisor of total epochs."
+
+    train_loader, train_metadata = eak.create_dataloader(
         config,
         "train",
         test_set_mode=False,
-        epochs_per_iter=config.eval_interval if config.eval_interval is not None else config.epochs,
+        epochs_per_iter=train_epochs_per_iter,
         global_batch_size=config.global_batch_size,
         rank=RANK,
         world_size=WORLD_SIZE,
     )
-    eval_loader, eval_metadata = eak.create_dataloader(
-        config,
-        "test",
-        test_set_mode=True,
-        epochs_per_iter=1,
-        global_batch_size=config.global_batch_size,
-        rank=RANK,
-        world_size=WORLD_SIZE,
-    )
+    try:
+        eval_loader, eval_metadata = eak.create_dataloader(
+            config,
+            "test",
+            test_set_mode=True,
+            epochs_per_iter=1,
+            global_batch_size=config.global_batch_size,
+            rank=RANK,
+            world_size=WORLD_SIZE,
+        )
+    except Exception:
+        print("NO EVAL DATA FOUND")
+        eval_loader = None
+        eval_metadata = None
 
-    evaluators = eak.create_evaluators(config, eval_metadata)
+    try:
+        evaluators = eak.create_evaluators(config, eval_metadata)
+    except Exception:
+        print("No evaluator found")
+        evaluators = []
 
     train_state = eak.init_train_state(config, train_metadata, rank=RANK, world_size=WORLD_SIZE)
-    train_state.model.eval()
 
-    if use_z_h_seed and gamma > 0:
-        patch_act_model_inner(train_state.model, gamma=gamma, seed_mode=seed_mode)
+    if use_z_h_seed:
+        patch_act_model_inner(train_state.model, gamma=float(gamma), seed_mode=seed_mode)
 
     ident_path = data_dir_for_identifiers
     if ident_path is None and config.data_paths_test:
@@ -256,17 +280,120 @@ def run_hybrid_eval(
         ident_path = Path(config.data_paths[0])
     identifier_list = load_identifiers(ident_path)
 
-    return evaluate_with_z_h_seed(
-        trm_root=trm_root,
-        config=config,
-        train_state=train_state,
-        eval_loader=eval_loader,
-        eval_metadata=eval_metadata,
-        evaluators=evaluators,
-        rank=RANK,
-        world_size=WORLD_SIZE,
-        cpu_group=CPU_PROCESS_GROUP,
-        identifier_list=identifier_list,
-        prior_batch_fn=prior_batch_fn if use_z_h_seed else None,
-        seed_first_step_only=seed_first_step_only,
-    )
+    prior_in_eval = prior_batch_fn if use_z_h_seed else None
+
+    torch.random.manual_seed(config.seed + RANK)
+
+    progress_bar = None
+    ema_helper = None
+    if RANK == 0:
+        _cap = None if smoke_train_batches is None else max(1, int(smoke_train_batches))
+        pb_total = _cap * total_iters if _cap is not None else train_state.total_steps
+        progress_bar = tqdm.tqdm(total=pb_total)
+        print({"num_params": sum(x.numel() for x in train_state.model.parameters())})
+        eak.save_code_and_config(config)
+    if config.ema:
+        print("Setup EMA")
+        ema_helper = eak.EMAHelper(mu=config.ema_rate)
+        ema_helper.register(train_state.model)
+
+    last_metrics: Optional[Dict[str, Any]] = None
+
+    for _iter_id in range(total_iters):
+        print(f"[Rank {RANK}, World Size {WORLD_SIZE}]: Epoch {_iter_id * train_epochs_per_iter}")
+
+        if RANK == 0:
+            print("TRAIN")
+        train_state.model.train()
+        train_cap = None if smoke_train_batches is None else max(1, int(smoke_train_batches))
+        train_batches_this_iter = 0
+        for _set_name, batch, global_batch_size in train_loader:
+            metrics = eak.train_batch(
+                config, train_state, batch, global_batch_size, rank=RANK, world_size=WORLD_SIZE
+            )
+            train_batches_this_iter += 1
+            if RANK == 0 and metrics is not None and progress_bar is not None:
+                progress_bar.update(train_state.step - progress_bar.n)
+            if config.ema and ema_helper is not None:
+                ema_helper.update(train_state.model)
+            if train_cap is not None and train_batches_this_iter >= train_cap:
+                if RANK == 0:
+                    print(f"SMOKE: stopping train loop after {train_cap} batch(es)")
+                break
+
+        if _iter_id >= config.min_eval_interval:
+            if RANK == 0:
+                print("EVALUATE")
+            if eval_loader is None or eval_metadata is None:
+                if RANK == 0:
+                    print("EVALUATE skipped (no eval loader)")
+                if smoke_skip_eval and config.ema and ema_helper is not None:
+                    print("SMOKE: building EMA eval state only (no test split)")
+                    train_state_eval = eak.TrainState(
+                        model=ema_helper.ema_copy(train_state.model),
+                        optimizers=train_state.optimizers,
+                        optimizer_lrs=train_state.optimizer_lrs,
+                        carry=None,
+                        step=train_state.step,
+                        total_steps=train_state.total_steps,
+                    )
+                    train_state_eval.model.eval()
+                    del train_state_eval
+                    print("SMOKE OK (EMA eval-state construction)")
+                continue
+
+            if config.ema and ema_helper is not None:
+                print("SWITCH TO EMA")
+                train_state_eval = copy.deepcopy(train_state)
+                train_state_eval.model = ema_helper.ema_copy(train_state_eval.model)
+            else:
+                train_state_eval = train_state
+            train_state_eval.model.eval()
+
+            if smoke_skip_eval:
+                if RANK == 0:
+                    print("SMOKE: skipping evaluate() and checkpoint save")
+                if config.ema and ema_helper is not None:
+                    del train_state_eval
+                print("SMOKE OK")
+                continue
+
+            if use_z_h_seed:
+                last_metrics = evaluate_with_z_h_seed(
+                    trm_root=trm_root,
+                    config=config,
+                    train_state=train_state_eval,
+                    eval_loader=eval_loader,
+                    eval_metadata=eval_metadata,
+                    evaluators=evaluators,
+                    rank=RANK,
+                    world_size=WORLD_SIZE,
+                    cpu_group=CPU_PROCESS_GROUP,
+                    identifier_list=identifier_list,
+                    prior_batch_fn=prior_in_eval,
+                    seed_first_step_only=seed_first_step_only,
+                )
+            else:
+                last_metrics = eak.evaluate(
+                    config,
+                    train_state_eval,
+                    eval_loader,
+                    eval_metadata,
+                    evaluators,
+                    rank=RANK,
+                    world_size=WORLD_SIZE,
+                    cpu_group=CPU_PROCESS_GROUP,
+                )
+
+            if RANK == 0 and last_metrics is not None:
+                print(last_metrics, train_state.step)
+
+            if RANK == 0:
+                print("SAVE CHECKPOINT")
+            if RANK == 0 and (config.checkpoint_every_eval or (_iter_id == total_iters - 1)):
+                eak.save_train_state(config, train_state_eval)
+
+            if config.ema and ema_helper is not None:
+                del train_state_eval
+
+    return last_metrics

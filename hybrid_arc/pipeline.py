@@ -82,6 +82,8 @@ def run_mode(
     priors_path: Optional[Path],
     csv_path: Optional[Path],
     data_dir_identifiers: Optional[Path],
+    smoke_train_batches: Optional[int] = None,
+    smoke_skip_eval: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """
     ``mode``: ``trm_only`` | ``z_h_seed`` | ``z_h_seed_zero`` (gamma 0, patched inner).
@@ -101,6 +103,8 @@ def run_mode(
         prior_batch_fn=prior_fn,
         seed_first_step_only=True,
         data_dir_for_identifiers=data_dir_identifiers,
+        smoke_train_batches=smoke_train_batches,
+        smoke_skip_eval=smoke_skip_eval,
     )
     if csv_path is not None:
         flat: Dict[str, Any] = {"mode": mode, "gamma": g, "seed_mode": seed_mode}
