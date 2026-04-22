@@ -1,27 +1,25 @@
-from typing import Optional, Any, Sequence, List
-from dataclasses import dataclass
-import os
 import math
-import yaml
+import os
 import shutil
+from dataclasses import dataclass
+from typing import Any, List, Optional, Sequence
 
-import torch
-import torch.distributed as dist
-from torch import nn
-from torch.utils.data import DataLoader
-
-import tqdm
 #import wandb
 import coolname
 import hydra
 import pydantic
-from omegaconf import DictConfig
+import torch
+import torch.distributed as dist
+import tqdm
+import yaml
 from adam_atan2_pytorch import AdamAtan2
-
-from puzzle_dataset import PuzzleDataset, PuzzleDatasetConfig, PuzzleDatasetMetadata
-from utils.functions import load_model_class, get_model_source_path
-from models.sparse_embedding import CastedSparseEmbeddingSignSGD_Distributed
 from models.ema import EMAHelper
+from models.sparse_embedding import CastedSparseEmbeddingSignSGD_Distributed
+from omegaconf import DictConfig
+from puzzle_dataset import PuzzleDataset, PuzzleDatasetConfig, PuzzleDatasetMetadata
+from torch import nn
+from torch.utils.data import DataLoader
+from utils.functions import get_model_source_path, load_model_class
 
 
 class LossConfig(pydantic.BaseModel):

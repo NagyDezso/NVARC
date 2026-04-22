@@ -110,7 +110,11 @@ def run_mode(
         flat: Dict[str, Any] = {"mode": mode, "gamma": g, "seed_mode": seed_mode}
         if metrics:
             for split, m in metrics.items():
-                for k, v in m.items():
-                    flat[f"{split}/{k}"] = float(v) if hasattr(v, "item") else v
+                if isinstance(m, dict):
+                    for k, v in m.items():
+                        flat[f"{split}/{k}"] = float(v) if hasattr(v, "item") else v
+                else:
+                    # Flat metric value (evaluator returned {metric: value} directly)
+                    flat[split] = float(m) if hasattr(m, "item") else m
         log_ablation_row(csv_path, flat)
     return metrics
