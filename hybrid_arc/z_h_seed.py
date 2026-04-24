@@ -19,9 +19,18 @@ SeedMode = Literal["add", "replace_blend"]
 def embed_prior_grid_tokens(inner: nn.Module, y_prior_tokens: torch.Tensor) -> torch.Tensor:
     """
     ``y_prior_tokens``: ``[B, seq_len]`` int64 in TRM vocab (PAD=0, EOS=1, colors+2).
-    Returns ``[B, seq_len, D]`` via ``inner.embed_tokens`` (same dtype as model).
+    Returns ``[B, seq_len, D]`` matched to the magnitude/positional treatment that
+    ``TinyRecursiveReasoningModel_ACTV1_Inner._input_embeddings`` applies to grid
+    tokens, so the hint lives in the same space the z-track has been trained to see:
+    ``embed_scale * [0.707 * (embed_tokens + embed_pos_grid_slice)]`` for learned
+    pos, or ``embed_scale * embed_tokens`` for rope.
     """
-    return inner.embed_tokens(y_prior_tokens.to(torch.int32))
+    emb = inner.embed_tokens(y_prior_tokens.to(torch.int32))
+    if getattr(inner.config, "pos_encodings", None) == "learned":
+        pos_table = inner.embed_pos.embedding_weight.to(emb.dtype)
+        grid_pos = pos_table[inner.puzzle_emb_len :]
+        emb = 0.707106781 * (emb + grid_pos)
+    return inner.embed_scale * emb
 
 
 def apply_z_h_seed(
