@@ -25,6 +25,20 @@ Example (same as notebook: base + PEFT skeleton; optional pickled LoRA state)::
     --lora-state /path/to/default_weights.pkl \\
     --max-puzzles 10
 
+Verify-then-seed (also asks Qwen to reproduce each train output via leave-one-out, and
+emits the per-puzzle confidence the consumer reads as ``pass_rate``)::
+
+  uv run python tools/gen_priors_from_test_puzzles.py \\
+    --test-puzzles TRM/arc-prize-trm-evaluation-data/test_puzzles.json \\
+    --out TRM/priors.json --verify \\
+    --model /path/to/qwen3_4b_grids15_sft139/transformers/bfloat16/1 \\
+    --no-lora --max-puzzles 10
+
+Without ``--verify`` the output is the legacy raw-grid schema (consumer treats those
+as ``pass_rate=1.0``). With ``--verify`` each test entry becomes
+``{"grid": [...], "pass_rate": float, "train_matches": k, "train_total": n}``.
+Cost is ``(1 + n_train_pairs)x`` more LLM calls per puzzle.
+
 Requires: ``unsloth``, ``torch``, ``transformers``, ``peft``, ``tqdm`` (Linux + GPU typical).
 """
 
@@ -84,6 +98,13 @@ def main() -> None:
     )
     ap.add_argument("--max-puzzles", type=int, default=0)
     ap.add_argument("--max-new-tokens", type=int, default=0, help="0 = use QwenFormatter.max_new_tokens()")
+    ap.add_argument(
+        "--verify",
+        action="store_true",
+        help="Leave-one-out: query Qwen on each train input (using the other train pairs as few-shot) "
+        "and compute pass_rate = #matches / #train_pairs. Emits the new {grid, pass_rate} schema. "
+        "Single-train-pair puzzles default to pass_rate=1.0 (cannot leave-one-out).",
+    )
     args = ap.parse_args()
     if args.lora_state is not None and args.no_lora:
         ap.error("--lora-state requires LoRA (--no-lora must not be set)")
@@ -131,32 +152,82 @@ def main() -> None:
     formatter = QwenFormatter(tokenizer=tokenizer)
     max_new = int(args.max_new_tokens) if args.max_new_tokens > 0 else formatter.max_new_tokens()
 
+    def _query(train_pairs: List[Any], query_input: Dict[str, Any]) -> Any:
+        """Run Qwen on (few-shot ``train_pairs``, ``query_input``); return uint8 grid or ``None``."""
+        prompt = prompt_for_test_puzzle(train_pairs, query_input, formatter)
+        inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+        with torch.inference_mode():
+            out = model.generate(
+                **inputs,
+                max_new_tokens=max_new,
+                do_sample=False,
+                pad_token_id=tokenizer.eos_token_id,
+            )
+        gen = out[0, inputs["input_ids"].shape[1] :]
+        return formatter.convert_tokens_to_array(gen.detach().cpu().tolist())
+
+    def _grids_equal(a: Any, b: Any) -> bool:
+        if a is None or b is None:
+            return False
+        try:
+            import numpy as _np  # noqa: WPS433
+
+            aa = _np.asarray(a)
+            bb = _np.asarray(b)
+            return aa.shape == bb.shape and bool((aa == bb).all())
+        except Exception:
+            return False
+
     priors: Dict[str, List[Any]] = {}
 
     for pid in tqdm(ids):
         doc = raw[pid]
         train = doc["train"]
         tests = doc["test"]
-        grids: List[Any] = []
+
+        # Leave-one-out verification: ask Qwen to reproduce each train output using the
+        # remaining train pairs as few-shot. Pass rate is the fraction it nails.
+        train_matches = 0
+        train_total = 0
+        if args.verify and len(train) >= 2:
+            train_total = len(train)
+            for i, gold in enumerate(train):
+                heldout = [p for j, p in enumerate(train) if j != i]
+                query_in = {"input": gold["input"]}
+                pred = _query(heldout, query_in)
+                if _grids_equal(pred, gold["output"]):
+                    train_matches += 1
+            pass_rate = train_matches / train_total
+        else:
+            # Single train pair (or --verify off): default to full confidence so γ is
+            # unchanged from the legacy path. Consumer ignores pass_rate when reading the
+            # legacy raw-grid form.
+            pass_rate = 1.0
+
+        entries: List[Any] = []
         for t in tests:
             test_in = {k: v for k, v in t.items() if k != "output"}
-            prompt = prompt_for_test_puzzle(train, test_in, formatter)
-            inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-            with torch.inference_mode():
-                out = model.generate(
-                    **inputs,
-                    max_new_tokens=max_new,
-                    do_sample=False,
-                    pad_token_id=tokenizer.eos_token_id,
-                )
-            gen = out[0, inputs["input_ids"].shape[1] :]
-            grid = formatter.convert_tokens_to_array(gen.detach().cpu().tolist())
-            grids.append(grid.tolist() if grid is not None else None)
-        priors[pid] = grids
+            grid = _query(train, test_in)
+            grid_l = grid.tolist() if grid is not None else None
+            if args.verify:
+                if grid_l is None:
+                    entries.append(None)
+                else:
+                    entries.append(
+                        {
+                            "grid": grid_l,
+                            "pass_rate": pass_rate,
+                            "train_matches": train_matches,
+                            "train_total": train_total,
+                        }
+                    )
+            else:
+                entries.append(grid_l)
+        priors[pid] = entries
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(priors), encoding="utf-8")
-    print(f"Wrote {args.out} ({len(priors)} puzzles)")
+    print(f"Wrote {args.out} ({len(priors)} puzzles, schema={'verify' if args.verify else 'legacy'})")
 
 
 if __name__ == "__main__":

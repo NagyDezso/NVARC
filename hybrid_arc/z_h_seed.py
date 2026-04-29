@@ -8,12 +8,15 @@ forcing on discrete grids between ACT steps.
 
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Literal, Optional, Union
 
 import torch
 import torch.nn as nn
 
 SeedMode = Literal["add", "replace_blend"]
+
+GammaLike = Union[float, torch.Tensor]
+"""Scalar γ, or a ``[B,1,1]`` tensor for per-row scaling (verify-then-seed)."""
 
 
 def embed_prior_grid_tokens(inner: nn.Module, y_prior_tokens: torch.Tensor) -> torch.Tensor:
@@ -38,7 +41,7 @@ def apply_z_h_seed(
     hint: torch.Tensor,
     *,
     puzzle_emb_len: int,
-    gamma: float,
+    gamma: GammaLike,
     seed_mode: SeedMode,
     valid_mask: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
@@ -46,6 +49,9 @@ def apply_z_h_seed(
     Mutate ``z_H`` grid slice ``[:, puzzle_emb_len:, :]`` in-place.
 
     ``hint`` must match spatial size ``z_H[:, puzzle_emb_len:, :].shape``.
+
+    ``gamma`` is either a Python float (uniform across the batch) or a ``[B,1,1]``
+    tensor for per-row scaling (verify-then-seed); broadcasts against ``zg``.
 
     ``valid_mask`` optional ``[B, seq_len]`` bool; False positions skip update (keeps
     initialized ``z_H`` there). If ``None``, all positions updated.
@@ -60,7 +66,10 @@ def apply_z_h_seed(
     else:
         m = valid_mask
     m3 = m.unsqueeze(-1)
-    g = float(gamma)
+    if isinstance(gamma, torch.Tensor):
+        g = gamma.to(zg.dtype)
+    else:
+        g = float(gamma)
     if seed_mode == "add":
         zg[:] = torch.where(m3, zg + g * hg, zg)
     elif seed_mode == "replace_blend":

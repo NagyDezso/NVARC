@@ -1,5 +1,15 @@
 """
 Orchestration: optional teacher priors, TRM eval with ``z_H`` seeding, CSV ablation logs.
+
+Priors JSON schema (per ``base_puzzle_id`` -> list indexed by flat test index):
+
+    Legacy (backward-compat): the entry is a 2D grid (``List[List[int]]``) or ``null``.
+    Confidence-aware:          the entry is ``{"grid": [...], "pass_rate": float, ...}``.
+
+``pass_rate`` is the verify-then-seed confidence — the fraction of the puzzle's training
+pairs the proposing program reproduces exactly when re-executed. It scales γ per-row at
+eval time: ``gamma_eff = gamma_cli * pass_rate`` (legacy entries default to ``pass_rate=1.0``
+to preserve old behavior). ``pass_rate=0`` skips seeding for that row entirely.
 """
 
 from __future__ import annotations
@@ -8,17 +18,49 @@ import csv
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
 from .arc_tokenize import canonical_grid_to_row_space
 from .trm_stage import SeedMode, run_hybrid_eval
 
+PriorEntry = Tuple[np.ndarray, float]
+"""``(grid_HxW_uint8, pass_rate_in_[0,1])``."""
+
+
+def _coerce_grid(g: Any) -> Optional[np.ndarray]:
+    if g is None:
+        return None
+    a = np.asarray(g, dtype=np.uint8)
+    if a.ndim != 2:
+        return None
+    return a
+
+
+def _parse_prior_entry(entry: Any) -> Optional[PriorEntry]:
+    """Accept either a raw grid (legacy) or ``{"grid": ..., "pass_rate": ...}``."""
+    if entry is None:
+        return None
+    if isinstance(entry, dict):
+        a = _coerce_grid(entry.get("grid"))
+        if a is None:
+            return None
+        pr = entry.get("pass_rate", 1.0)
+        try:
+            w = float(pr)
+        except (TypeError, ValueError):
+            w = 1.0
+        return a, max(0.0, min(1.0, w))
+    a = _coerce_grid(entry)
+    if a is None:
+        return None
+    return a, 1.0
+
 
 @dataclass
 class PriorStore:
-    """Load ``priors.json``: ``{ base_puzzle_id: [ per-test-index list of grids ] }``."""
+    """Load ``priors.json``: ``{ base_puzzle_id: [ per-test-index entry ] }``."""
 
     data: Dict[str, List[Any]]
 
@@ -27,7 +69,7 @@ class PriorStore:
         with open(path, "r", encoding="utf-8") as f:
             return cls(json.load(f))
 
-    def get(self, augmented_name: str, test_flat_index: int = 0) -> Optional[np.ndarray]:
+    def get(self, augmented_name: str, test_flat_index: int = 0) -> Optional[PriorEntry]:
         from dataset.build_arc_dataset import PuzzleIdSeparator  # noqa: WPS433
 
         sep = PuzzleIdSeparator
@@ -37,23 +79,25 @@ class PriorStore:
         grids = self.data[base]
         if test_flat_index < 0 or test_flat_index >= len(grids):
             return None
-        g = grids[test_flat_index]
-        if g is None:
+        parsed = _parse_prior_entry(grids[test_flat_index])
+        if parsed is None:
             return None
-        a = np.asarray(g, dtype=np.uint8)
-        if a.ndim != 2:
+        a, w = parsed
+        if w <= 0.0:
             return None
         if sep in augmented_name:
             a = canonical_grid_to_row_space(a, augmented_name)
-        return a
+        return a, w
 
 
-def make_prior_fn(store: Optional[PriorStore]) -> Optional[Callable[..., List[Optional[Any]]]]:
+def make_prior_fn(
+    store: Optional[PriorStore],
+) -> Optional[Callable[..., List[Optional[PriorEntry]]]]:
     if store is None:
         return None
 
-    def _fn(batch, row_names: List[str]) -> List[Optional[Any]]:
-        out: List[Optional[Any]] = []
+    def _fn(batch, row_names: List[str]) -> List[Optional[PriorEntry]]:
+        out: List[Optional[PriorEntry]] = []
         for name in row_names:
             out.append(store.get(name, 0))
         return out

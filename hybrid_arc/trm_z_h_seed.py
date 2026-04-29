@@ -8,7 +8,7 @@ orphans them, which manifests as catastrophic eval regression at gamma=0).
 from __future__ import annotations
 
 import types
-from typing import Dict, Tuple
+from typing import Any, Dict, Tuple
 
 import torch
 from torch import nn
@@ -46,11 +46,19 @@ def _seeded_forward(
         # Match the magnitude of `_input_embeddings`: tokens go through `embed_scale`
         # there, so without this the z_H delta is ~sqrt(D)x too small.
         hint = hint * self.embed_scale
+        # Verify-then-seed: per-row scale (e.g. program pass_rate on train pairs) lets
+        # the same eval batch mix high-confidence and low-confidence proposals; rows with
+        # scale == 0 become a no-op without needing to filter the batch.
+        gamma_scale = batch.get("y_prior_gamma_scale")
+        if gamma_scale is None:
+            eff_gamma: Any = float(self.gamma)
+        else:
+            eff_gamma = float(self.gamma) * gamma_scale.to(z_H.dtype)
         z_H = apply_z_h_seed(
             z_H,
             hint,
             puzzle_emb_len=self.puzzle_emb_len,
-            gamma=float(self.gamma),
+            gamma=eff_gamma,
             seed_mode=self.seed_mode,
             valid_mask=valid,
         )

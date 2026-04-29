@@ -1,15 +1,31 @@
 {
+  "_comment": "Two accepted entry shapes per test index (see hybrid_arc/pipeline.py): a raw 2D grid (legacy) or {grid, pass_rate, ...}. pass_rate scales gamma per-row at eval time; 0 skips the seed for that puzzle, 1 uses gamma as-is. program_id/notes are ignored by the runtime but useful for ablation logs.",
   "00576224": [
-    [
-      [0, 1, 2],
-      [3, 4, 5],
-      [6, 7, 8]
-    ]
+    {
+      "grid": [
+        [0, 1, 2],
+        [3, 4, 5],
+        [6, 7, 8]
+      ],
+      "pass_rate": 1.0,
+      "program_id": "qwen_v1#abc123",
+      "notes": "all 3/3 train pairs reproduced exactly"
+    }
   ],
   "another_puzzle_id": [
+    {
+      "grid": [
+        [9, 0, 1],
+        [2, 3, 4]
+      ],
+      "pass_rate": 0.6667,
+      "program_id": "qwen_v1#def456"
+    }
+  ],
+  "legacy_puzzle_id": [
     [
-      [9, 0, 1],
-      [2, 3, 4]
+      [0, 1, 2],
+      [3, 4, 5]
     ]
   ]
 }

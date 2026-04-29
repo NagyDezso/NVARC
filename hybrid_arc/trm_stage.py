@@ -97,14 +97,32 @@ def evaluate_with_z_h_seed(
 
             if prior_batch_fn is not None:
                 y_list = prior_batch_fn(batch, row_names)
+                # ``prior_batch_fn`` may return either ``np.ndarray`` (legacy) or
+                # ``(grid, pass_rate)`` (verify-then-seed). Split into grids + weights.
+                grids: List[Optional[Any]] = []
+                weights: List[float] = []
+                for entry in y_list:
+                    if entry is None:
+                        grids.append(None)
+                        weights.append(0.0)
+                    elif isinstance(entry, tuple):
+                        g, w = entry
+                        grids.append(g)
+                        weights.append(float(w))
+                    else:
+                        grids.append(entry)
+                        weights.append(1.0)
                 yt = batch_y_prior_tokens(
                     batch["inputs"],
-                    y_list,
+                    grids,
                     do_translation=False,
                     device=batch["inputs"].device,
                 )
-                if yt is not None:
+                if yt is not None and any(w > 0.0 for w in weights):
                     batch["y_prior_tokens"] = yt
+                    batch["y_prior_gamma_scale"] = torch.tensor(
+                        weights, dtype=torch.float32, device=batch["inputs"].device
+                    ).view(-1, 1, 1)
 
             with torch.device("cuda"):
                 carry = train_state.model.initial_carry(batch)  # type: ignore[operator]
@@ -113,6 +131,7 @@ def evaluate_with_z_h_seed(
             while True:
                 if seed_first_step_only and inference_steps > 0:
                     batch.pop("y_prior_tokens", None)
+                    batch.pop("y_prior_gamma_scale", None)
                 carry, loss, metrics, preds, all_finish = train_state.model(
                     carry=carry, batch=batch, return_keys=return_keys
                 )
