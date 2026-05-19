@@ -1,0 +1,63 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+.Python
+build/
+dist/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+
+# --- Virtual environments ---
+.venv/
+venv/
+env/
+ENV/
+
+# --- Data, checkpoints, generated outputs ---
+data/
+synthetic/
+checkpoints/
+results/
+logs/
+wandb/
+mlruns/
+submission.json
+submission_*.json
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.ckpt
+*.gguf
+
+# --- Hugging Face / model caches ---
+.cache/
+.huggingface/
+
+# --- Kaggle credentials ---
+kaggle.json
+.kaggle/
+
+# --- IDE / editor ---
+.vscode/
+.idea/
+*.swp
+*.swo
+.zed/
+.cursor/
+.aider*
+
+# --- OS junk ---
+.DS_Store
+Thumbs.db
+
+# --- Claude Code session artifacts ---
+.claude/

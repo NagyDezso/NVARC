@@ -1,0 +1,59 @@
+model:
+  name_or_path: sapientinc/HRM-Text-1B
+  dtype: bfloat16
+  trust_remote_code: true
+  attn_implementation: sdpa  # set to flash_attention_2 if installed
+  gradient_checkpointing: true
+
+  # PEFT / LoRA. Set enabled=false for full fine-tune.
+  lora:
+    enabled: true
+    r: 32
+    alpha: 64
+    dropout: 0.05
+    # HRM exposes H_level and L_level modules; we target the attention/MLP
+    # projections inside both. Names verified against the hrm_text model class.
+    target_modules:
+      - q_proj
+      - k_proj
+      - v_proj
+      - o_proj
+      - gate_proj
+      - up_proj
+      - down_proj
+
+data:
+  train_dataset_path:
+    - data/hrm_v1/arc2_training
+    - data/hrm_v1/mini
+    - data/hrm_v1/concept
+    - data/hrm_v1/rearc
+    - data/hrm_v1/nvarc_training
+    - data/hrm_v1/nvarc_full
+  val_dataset_path: data/hrm_v1/arc2_evaluation6
+  max_length: 4096
+  # Length to which prompt+response is packed; samples longer than this are dropped.
+  drop_longer: true
+
+training:
+  output_dir: checkpoints/hrm-arc
+  seed: 42
+  num_train_epochs: 1
+  max_steps: -1
+  per_device_train_batch_size: 1
+  per_device_eval_batch_size: 1
+  gradient_accumulation_steps: 32
+  learning_rate: 1.0e-4
+  min_lr: 1.0e-7
+  weight_decay: 0.1
+  warmup_steps: 200
+  lr_scheduler_type: linear
+  max_grad_norm: 0.5
+  logging_steps: 10
+  eval_steps: 200
+  save_steps: 200
+  save_total_limit: 3
+  bf16: true
+  optim: adamw_torch
+  report_to: none  # set to wandb to enable
+  run_name: hrm-arc-sft

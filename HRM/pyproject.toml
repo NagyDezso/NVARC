@@ -1,0 +1,35 @@
+[project]
+name = "nvarc-hrm"
+version = "0.1.0"
+description = "NVARC ARC-AGI-2 pipeline adapted to use sapientinc/HRM-Text-1B"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.3",
+    # HRM-Text-1B needs the hrm_text model class from transformers main.
+    "transformers @ git+https://github.com/huggingface/transformers.git@main",
+    "accelerate>=0.34",
+    "peft>=0.13",
+    "datasets>=2.20",
+    "safetensors>=0.4",
+    "numpy",
+    "tqdm",
+    "omegaconf",
+    "kaggle",
+]
+
+[project.optional-dependencies]
+# Optional 8-bit / 4-bit optimizers and quantization. Not available on Windows.
+quant = ["bitsandbytes>=0.43"]
+# Logging.
+wandb = ["wandb>=0.17"]
+# Flash attention. Requires a CUDA toolchain at install time.
+flash = ["flash-attn>=2.6"]
+
+[tool.uv]
+# Pin to the same Python the rest of the repo uses (see ../.venv/pyvenv.cfg).
+required-version = ">=0.4"
+# The yarl 1.24.x series only ships cp310 wheels, breaking cp311/cp312 envs.
+# Force a version range that has wheels for all supported ABIs.
+override-dependencies = [
+    "yarl>=1.18,<1.24",
+]
