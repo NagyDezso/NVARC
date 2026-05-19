@@ -4,10 +4,10 @@ Single-node multi-GPU SFT using HuggingFace ``Trainer`` + ``accelerate``.
 Supports LoRA via PEFT (recommended for 1B at seq 4096) or full fine-tune.
 
 Run:
-    accelerate launch HRM/train_sft.py --config HRM/configs/sft.yaml
+    accelerate launch HRM/train_sft.py --config HRM/configs/sft_lora.yaml
 
 Smoke test (no accelerate, runs 2 steps on the val set):
-    python HRM/train_sft.py --config HRM/configs/sft.yaml --smoke_test
+    python HRM/train_sft.py --config HRM/configs/sft_lora.yaml --smoke_test
 """
 
 from __future__ import annotations
@@ -103,6 +103,9 @@ def main() -> None:
     ap.add_argument("--config", required=True)
     ap.add_argument("--smoke_test", action="store_true",
                     help="Run 2 training steps on the val set, no checkpointing")
+    ap.add_argument("--resume", nargs="?", const=True, default=False,
+                    help="Resume training. Pass a checkpoint dir, or no value "
+                         "to auto-pick the latest in training.output_dir.")
     args = ap.parse_args()
 
     cfg = OmegaConf.load(args.config)
@@ -175,7 +178,11 @@ def main() -> None:
         data_collator=collator,
     )
 
-    trainer.train()
+    # --resume: True -> let Trainer auto-find the latest checkpoint in
+    # output_dir; a string -> resume from that exact checkpoint dir.
+    resume = args.resume if not args.smoke_test else False
+    trainer.train(resume_from_checkpoint=resume)
+
     if not args.smoke_test:
         trainer.save_model(cfg.training.output_dir)
         tokenizer.save_pretrained(cfg.training.output_dir)

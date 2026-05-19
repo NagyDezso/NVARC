@@ -22,8 +22,9 @@ dependencies = [
 quant = ["bitsandbytes>=0.43"]
 # Logging.
 wandb = ["wandb>=0.17"]
-# Flash attention. Requires a CUDA toolchain at install time.
-flash = ["flash-attn>=2.6"]
+# NOTE: no `flash` extra — HRM runs with prefix_lm=True, whose 4-D PrefixLM
+# attention mask cannot be represented by FlashAttention. Configs use
+# flex_attention, which is built into PyTorch and needs no extra dependency.
 
 [tool.uv]
 # Pin to the same Python the rest of the repo uses (see ../.venv/pyvenv.cfg).

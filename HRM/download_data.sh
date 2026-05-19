@@ -4,13 +4,17 @@
 # expects: arc2_training, arc2_evaluation6, mini, concept, rearc,
 # nvarc_training, nvarc_full.
 #
-# Requires: `pip install kaggle` and a configured ~/.kaggle/kaggle.json.
+# Requires: `uv sync --project HRM` (pins the kaggle CLI) and a configured
+# ~/.kaggle/kaggle.json.
 #
 # Usage:
 #   bash HRM/download_data.sh                # default target: data/grids_v15
 #   bash HRM/download_data.sh /path/to/dir   # custom target
 
 set -euo pipefail
+
+# Absolute paths so the kaggle CLI invocation survives the cd into $TARGET.
+HRM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 TARGET="${1:-data/grids_v15}"
 mkdir -p "$TARGET"
@@ -19,7 +23,7 @@ cd "$TARGET"
 
 # Prefer the kaggle CLI from the HRM uv venv (where it's pinned in pyproject)
 # so we don't depend on a system-wide install.
-KAGGLE=(uv run --project HRM kaggle)
+KAGGLE=(uv run --project "$HRM_DIR" kaggle)
 if ! "${KAGGLE[@]}" --help >/dev/null 2>&1; then
     if command -v kaggle >/dev/null 2>&1; then
         KAGGLE=(kaggle)
@@ -40,4 +44,4 @@ echo "Done. Contents of $TARGET:"
 ls -la
 
 echo
-echo "Next: python HRM/prepare_data.py --in_dir $TARGET --out_dir data/hrm_v1"
+echo "Next: uv run --project HRM python HRM/prepare_data.py --in_dir $TARGET --out_dir data/hrm_v1"

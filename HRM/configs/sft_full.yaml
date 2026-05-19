@@ -1,0 +1,74 @@
+## Full fine-tune of HRM-Text-1B on the COMPLETE ~3.2M-sample dataset,
+## single 24 GB GPU (e.g. RTX 4090).
+##
+## A full epoch here is weeks of 4090 time. This config is built to be run
+## open-ended and stopped whenever you like: a checkpoint is written every
+## save_steps, and the LR schedule is constant (no decay) so any checkpoint is
+## a valid finished model. For a fixed ~1-2 day budget use sft_full_small.yaml
+## instead.
+##
+## Differs from sft_lora.yaml in two ways:
+##   * lora.enabled: false        -> every weight is trained
+##   * optim: adamw_bnb_8bit      -> int8 optimizer state (2 GB instead of 8 GB)
+##
+## Requires the quant extra:  uv sync --project HRM --extra quant
+## Run:                       uv run --project HRM python HRM/train_sft.py \
+##                                --config HRM/configs/sft_full.yaml
+## Stop:                      Ctrl+C (lose at most save_steps of progress).
+## Resume:                    add --resume  (auto-finds the latest checkpoint).
+##
+## Memory budget (bf16, seq 4096, bs 1, grad-ckpt on):
+##   weights 2 GB + grads 2 GB + 8-bit Adam 2 GB + activations ~6-10 GB
+##   => ~12-16 GB, comfortable on 24 GB.
+
+model:
+  name_or_path: sapientinc/HRM-Text-1B
+  dtype: bfloat16
+  trust_remote_code: true
+  attn_implementation: flex_attention     # flash_attention_2 incompatible with HRM prefix_lm
+  gradient_checkpointing: true            # required for full FT to fit
+
+  lora:
+    enabled: false   # <-- full fine-tune
+
+data:
+  train_dataset_path:
+    - data/hrm_v1/arc2_training
+    - data/hrm_v1/mini
+    - data/hrm_v1/concept
+    - data/hrm_v1/rearc
+    - data/hrm_v1/nvarc_training
+    - data/hrm_v1/nvarc_full
+  val_dataset_path: data/hrm_v1/arc2_evaluation6
+  max_length: 4096
+  drop_longer: true
+
+training:
+  output_dir: checkpoints/hrm-arc-full
+  seed: 42
+  num_train_epochs: 1
+  max_steps: -1
+  per_device_train_batch_size: 1
+  per_device_eval_batch_size: 1
+  gradient_accumulation_steps: 32
+  # Full FT is more sensitive than LoRA — lower LR, longer warmup.
+  learning_rate: 1.0e-5
+  min_lr: 1.0e-7
+  weight_decay: 0.1
+  warmup_steps: 400
+  # A full epoch over ~3.2M samples is weeks on a 4090, so this run is meant
+  # to be stopped early (Ctrl+C; a checkpoint lands every save_steps). A
+  # constant LR means any stopping point is a valid endpoint — there is no
+  # decay schedule left half-finished. To resume:  --resume
+  # If you instead set a hard budget, switch to lr_scheduler_type: cosine and
+  # set max_steps to that budget.
+  lr_scheduler_type: constant_with_warmup
+  max_grad_norm: 0.5
+  logging_steps: 10
+  eval_steps: 200
+  save_steps: 200
+  save_total_limit: 3
+  bf16: true
+  optim: adamw_bnb_8bit   # int8 optimizer state; needs bitsandbytes (--extra quant)
+  report_to: none
+  run_name: hrm-arc-sft-full

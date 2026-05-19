@@ -12,6 +12,15 @@ Usage:
         --out_dir data/hrm_v1 \\
         --tokenizer sapientinc/HRM-Text-1B \\
         --max_length 4096
+
+Budget-limited run (the full ~3.2M set is weeks of 4090 time).
+``--max_per_subset`` caps every subset to N shuffled rows, producing a balanced
+downsampled mix that keeps every data source represented:
+
+    python HRM/prepare_data.py \\
+        --in_dir data/grids_v15 \\
+        --out_dir data/hrm_v1_small \\
+        --max_per_subset 12000
 """
 
 from __future__ import annotations
@@ -27,9 +36,22 @@ from tqdm import tqdm
 from serialize import build_sample, DEFAULT_CONDITION
 
 
-def process_subset(in_path: Path, out_path: Path, tokenizer, max_length: int) -> None:
+def process_subset(
+    in_path: Path,
+    out_path: Path,
+    tokenizer,
+    max_length: int,
+    max_per_subset: int | None = None,
+    seed: int = 42,
+) -> None:
     ds = load_from_disk(str(in_path))
     print(f"[{in_path.name}] loaded {len(ds)} rows")
+
+    if max_per_subset is not None and len(ds) > max_per_subset:
+        # Shuffle before capping so the downsample is balanced across puzzles,
+        # not just the first N rows on disk.
+        ds = ds.shuffle(seed=seed).select(range(max_per_subset))
+        print(f"[{in_path.name}] capped to {len(ds)} rows (--max_per_subset)")
 
     rows = []
     n_dropped = 0
@@ -67,6 +89,11 @@ def main() -> None:
                     help="Directory to write HRM-tokenized subsets")
     ap.add_argument("--tokenizer", default="sapientinc/HRM-Text-1B")
     ap.add_argument("--max_length", type=int, default=4096)
+    ap.add_argument("--max_per_subset", type=int, default=None,
+                    help="Cap each subset to N shuffled rows (budget-limited "
+                         "runs). Default: keep every row.")
+    ap.add_argument("--seed", type=int, default=42,
+                    help="Shuffle seed used when --max_per_subset caps a subset")
     ap.add_argument("--subsets", nargs="*", default=None,
                     help="Optional explicit subset names; default = every subdir")
     args = ap.parse_args()
@@ -90,7 +117,10 @@ def main() -> None:
 
     subsets = args.subsets or sorted([p.name for p in in_dir.iterdir() if p.is_dir()])
     for name in subsets:
-        process_subset(in_dir / name, out_dir / name, tokenizer, args.max_length)
+        process_subset(
+            in_dir / name, out_dir / name, tokenizer, args.max_length,
+            max_per_subset=args.max_per_subset, seed=args.seed,
+        )
 
 
 if __name__ == "__main__":

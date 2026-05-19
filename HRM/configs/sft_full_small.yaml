@@ -1,0 +1,67 @@
+## Full fine-tune of HRM-Text-1B on a BUDGET-LIMITED, balanced data mix.
+## Target hardware: single 24 GB GPU (RTX 4090). Target wall-clock: ~1-2 days.
+##
+## This is the faithful NVARC methodology (full SFT, not LoRA — see ../README.md)
+## scaled down to a single-GPU compute budget. Instead of NVARC's full ~3.2M
+## augmented puzzles (weeks of 4090 time), it trains on a downsampled mix that
+## still keeps every data source represented.
+##
+## Prepare the data first with a per-subset cap:
+##   uv run --project HRM python HRM/prepare_data.py \
+##       --in_dir data/grids_v15 \
+##       --out_dir data/hrm_v1_small \
+##       --max_per_subset 12000
+##   -> 6 train subsets x 12k = ~72k samples
+##
+## Then:
+##   uv sync --project HRM --extra quant
+##   uv run --project HRM python HRM/train_sft.py \
+##       --config HRM/configs/sft_full_small.yaml
+
+model:
+  name_or_path: sapientinc/HRM-Text-1B
+  dtype: bfloat16
+  trust_remote_code: true
+  attn_implementation: flex_attention     # flash_attention_2 incompatible with HRM prefix_lm
+  gradient_checkpointing: true            # required for full FT to fit 24 GB
+
+  lora:
+    enabled: false   # full fine-tune — every weight is trained
+
+data:
+  # Downsampled mix written by prepare_data.py --max_per_subset.
+  train_dataset_path:
+    - data/hrm_v1_small/arc2_training
+    - data/hrm_v1_small/mini
+    - data/hrm_v1_small/concept
+    - data/hrm_v1_small/rearc
+    - data/hrm_v1_small/nvarc_training
+    - data/hrm_v1_small/nvarc_full
+  val_dataset_path: data/hrm_v1_small/arc2_evaluation6
+  max_length: 4096
+  drop_longer: true
+
+training:
+  output_dir: checkpoints/hrm-arc-full-small
+  seed: 42
+  # ~72k samples / (bs1 x grad-accum 32) ~= 2250 optimizer steps per epoch.
+  num_train_epochs: 2
+  max_steps: -1
+  per_device_train_batch_size: 1
+  per_device_eval_batch_size: 1
+  gradient_accumulation_steps: 32
+  # Full FT is sensitive — keep the LR low and warm up generously.
+  learning_rate: 1.0e-5
+  min_lr: 1.0e-7
+  weight_decay: 0.1
+  warmup_steps: 200
+  lr_scheduler_type: cosine
+  max_grad_norm: 0.5
+  logging_steps: 10
+  eval_steps: 200
+  save_steps: 200
+  save_total_limit: 3
+  bf16: true
+  optim: adamw_bnb_8bit   # int8 optimizer state; needs bitsandbytes (--extra quant)
+  report_to: none
+  run_name: hrm-arc-sft-full-small

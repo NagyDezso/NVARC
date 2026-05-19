@@ -2,7 +2,7 @@ model:
   name_or_path: sapientinc/HRM-Text-1B
   dtype: bfloat16
   trust_remote_code: true
-  attn_implementation: sdpa  # set to flash_attention_2 if installed
+  attn_implementation: flex_attention  # flash_attention_2 is incompatible with HRM's prefix_lm 4-D mask
   gradient_checkpointing: true
 
   # PEFT / LoRA. Set enabled=false for full fine-tune.

@@ -23,7 +23,7 @@ ARChitects "ARC-as-text" formulation.
 |---|---|---|
 | Model | Qwen3-4B-Thinking-2507 | sapientinc/HRM-Text-1B |
 | Tokenizer | Qwen3 BPE, cut to ARC tokens | HRM tokenizer (65k), optionally cut |
-| Training framework | NeMo-RL on Slurm + Megatron TP=8 | HF Transformers + `accelerate` / `torchrun` |
+| Training framework | NeMo-RL on Slurm + Megatron TP=8 | HF Transformers `Trainer`, single-GPU by default (`accelerate launch` for multi-GPU) |
 | Objective | Causal LM | **PrefixLM** — prompt is bidirectional, response is causal (via `token_type_ids`) |
 | Chat template | Qwen3 thinking template | HRM `<|im_start|>{condition}{prompt}<|im_end|>{response}` |
 | Vocab cut step | `cut_tokenizer.ipynb` (16 surviving tokens) | `prepare_tokenizer.py` (digits + newline + specials) |
@@ -34,9 +34,11 @@ ARChitects "ARC-as-text" formulation.
 ```
 HRM/
 ├── README.md              ← you are here
-├── requirements.txt       ← pinned deps
+├── pyproject.toml         ← deps, managed by uv
 ├── configs/
-│   └── sft.yaml           ← training hyperparameters
+│   ├── sft_lora.yaml      ← LoRA SFT (default, easiest)
+│   ├── sft_full.yaml      ← full fine-tune, 8-bit Adam
+│   └── sft_full_small.yaml ← full fine-tune on a capped subset
 ├── prepare_tokenizer.py   ← (optional) shrink HRM embedding to ARC-only tokens
 ├── prepare_data.py        ← convert NVARC `grids_v15/*` to HRM PrefixLM samples
 ├── serialize.py           ← grid <-> text + PrefixLM mask construction
@@ -74,11 +76,14 @@ NVARC SDG  →  data/grids_v15/{arc2_training, mini, concept, rearc, nvarc_*}
 This project uses [`uv`](https://docs.astral.sh/uv/) for environment / dependency management. All commands assume you're at the repo root.
 
 ```bash
-# 0. Create/sync the venv from HRM/pyproject.toml
+# 0. Create/sync the venv from HRM/pyproject.toml.
 uv sync --project HRM
-#    To include 4-/8-bit optimizers:    uv sync --project HRM --extra quant
-#    To include wandb logging:          uv sync --project HRM --extra wandb
-#    To include flash-attn:             uv sync --project HRM --extra flash
+#    To include 4-/8-bit optimizers:    add --extra quant
+#    To include wandb logging:          add --extra wandb
+#    Attention: configs use flex_attention (built into PyTorch, no extra deps).
+#    HRM's prefix_lm=True is incompatible with flash_attention_2 — its 4-D
+#    PrefixLM mask cannot be represented by FlashAttention. Use flex_attention
+#    (default) or sdpa.
 
 # 1. Fetch NVARC augmented-puzzle datasets from Kaggle (~3.2M puzzles, large).
 #    This skips the SDG regeneration step entirely.
@@ -86,20 +91,29 @@ bash HRM/download_data.sh                # writes to data/grids_v15/
 #    Alternatively, regenerate from scratch:
 #    uv run --project HRM python SDG/scripts/build_datasets.py
 
-# 2. Tokenize into HRM PrefixLM tensors (one-off, CPU-only)
+# 2. Tokenize into HRM PrefixLM tensors (one-off, CPU-only).
+#    Budget run: --max_per_subset caps each source for a ~1-2 day 4090 run.
 uv run --project HRM python HRM/prepare_data.py \
     --in_dir data/grids_v15 \
-    --out_dir data/hrm_v1 \
+    --out_dir data/hrm_v1_small \
+    --max_per_subset 12000 \
     --max_length 4096
+#    Full run (~3.2M samples, weeks of 4090 time): drop --max_per_subset and
+#    use --out_dir data/hrm_v1.
 
 # 3. Sanity-check the model loads + forward + generate works
 uv run --project HRM python HRM/smoke_test.py
 
 # 4. Optional Trainer smoke test (2 steps on val)
-uv run --project HRM python HRM/train_sft.py --config HRM/configs/sft.yaml --smoke_test
+uv run --project HRM python HRM/train_sft.py --config HRM/configs/sft_lora.yaml --smoke_test
 
-# 5. SFT (multi-GPU)
-uv run --project HRM accelerate launch HRM/train_sft.py --config HRM/configs/sft.yaml
+# 5. SFT — single GPU (no accelerate launch needed). Pick a config:
+#    sft_lora.yaml        LoRA, fast, easiest. data/hrm_v1*
+#    sft_full_small.yaml  full FT on the budget mix (faithful NVARC, ~1-2 days)
+#    sft_full.yaml        full FT on the complete 3.2M set (weeks on a 4090)
+uv run --project HRM python HRM/train_sft.py --config HRM/configs/sft_full_small.yaml
+#    Multi-GPU only: wrap with accelerate launch instead:
+#    uv run --project HRM accelerate launch HRM/train_sft.py --config HRM/configs/sft_full_small.yaml
 
 # 6. Eval / submission
 uv run --project HRM python HRM/infer.py \
@@ -119,6 +133,10 @@ uv run --project HRM python HRM/infer.py \
   `<|object_ref_end|>` (cot), `<|quad_start|>` (noisy), `<|quad_end|>` (synth)
   are *training-time* conditioning tags. We use `synth,cot` by default
   (`<|quad_end|><|object_ref_end|>`) to nudge structured/explained outputs.
-- Local 4 GB GPU is sufficient only for tokenizer prep and inference smoke
-  tests. Full SFT needs ≥ 1× H100 (or 2–4× A100/RTX 6000); a single H100 fits
-  the 1B model in bf16 with LoRA at seq 4096.
+- Hardware: both SFT modes run on a single 24 GB GPU (e.g. RTX 4090) at
+  seq 4096 with plain `python` — no `accelerate launch` needed.
+  - **LoRA** (`configs/sft_lora.yaml`) — the easy default. ~8–12 GB total.
+  - **Full fine-tune** (`configs/sft_full.yaml`) — also fits, but *only* with
+    8-bit AdamW (`optim: adamw_bnb_8bit`, needs `--extra quant`): ~12–16 GB.
+    With plain `adamw_torch` the optimizer state alone is 8 GB and a run can
+    OOM when activations spike. Use ≥ 40 GB if you want plain fp32 Adam.
