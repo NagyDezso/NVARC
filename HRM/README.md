@@ -78,8 +78,11 @@ This project uses [`uv`](https://docs.astral.sh/uv/) for environment / dependenc
 ```bash
 # 0. Create/sync the venv from HRM/pyproject.toml.
 uv sync --project HRM
-#    To include 4-/8-bit optimizers:    add --extra quant
-#    To include wandb logging:          add --extra wandb
+#    4-/8-bit optimizers (bitsandbytes) install by default on Linux/macOS.
+#    On Windows there are no bnb wheels — pick a non-bnb optim in the config.
+#    wandb logging is on by default (report_to: wandb in every config).
+#    Run `wandb login` first, or `wandb offline` / WANDB_MODE=offline to
+#    skip the cloud. Set report_to: none in the config to disable entirely.
 #    Attention: configs use flex_attention (built into PyTorch, no extra deps).
 #    HRM's prefix_lm=True is incompatible with flash_attention_2 — its 4-D
 #    PrefixLM mask cannot be represented by FlashAttention. Use flex_attention
@@ -137,6 +140,6 @@ uv run --project HRM python HRM/infer.py \
   seq 4096 with plain `python` — no `accelerate launch` needed.
   - **LoRA** (`configs/sft_lora.yaml`) — the easy default. ~8–12 GB total.
   - **Full fine-tune** (`configs/sft_full.yaml`) — also fits, but *only* with
-    8-bit AdamW (`optim: adamw_bnb_8bit`, needs `--extra quant`): ~12–16 GB.
+    8-bit AdamW (`optim: adamw_bnb_8bit`, bitsandbytes — Linux/macOS): ~12–16 GB.
     With plain `adamw_torch` the optimizer state alone is 8 GB and a run can
     OOM when activations spike. Use ≥ 40 GB if you want plain fp32 Adam.

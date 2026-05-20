@@ -14,7 +14,7 @@
 ##   -> 6 train subsets x 12k = ~72k samples
 ##
 ## Then:
-##   uv sync --project HRM --extra quant
+##   uv sync --project HRM
 ##   uv run --project HRM python HRM/train_sft.py \
 ##       --config HRM/configs/sft_full_small.yaml
 
@@ -62,6 +62,6 @@ training:
   save_steps: 200
   save_total_limit: 3
   bf16: true
-  optim: adamw_bnb_8bit   # int8 optimizer state; needs bitsandbytes (--extra quant)
-  report_to: none
+  optim: adamw_bnb_8bit   # int8 optimizer state; needs bitsandbytes (Linux/macOS)
+  report_to: wandb   # needs the wandb extra + `wandb login` (or WANDB_MODE=offline)
   run_name: hrm-arc-sft-full-small

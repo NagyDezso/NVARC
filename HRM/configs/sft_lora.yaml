@@ -55,5 +55,5 @@ training:
   save_total_limit: 3
   bf16: true
   optim: adamw_torch
-  report_to: none  # set to wandb to enable
+  report_to: wandb   # needs the wandb extra + `wandb login` (or WANDB_MODE=offline)
   run_name: hrm-arc-sft

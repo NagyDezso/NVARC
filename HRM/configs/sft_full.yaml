@@ -11,7 +11,7 @@
 ##   * lora.enabled: false        -> every weight is trained
 ##   * optim: adamw_bnb_8bit      -> int8 optimizer state (2 GB instead of 8 GB)
 ##
-## Requires the quant extra:  uv sync --project HRM --extra quant
+## Setup:                     uv sync --project HRM
 ## Run:                       uv run --project HRM python HRM/train_sft.py \
 ##                                --config HRM/configs/sft_full.yaml
 ## Stop:                      Ctrl+C (lose at most save_steps of progress).
@@ -69,6 +69,6 @@ training:
   save_steps: 200
   save_total_limit: 3
   bf16: true
-  optim: adamw_bnb_8bit   # int8 optimizer state; needs bitsandbytes (--extra quant)
-  report_to: none
+  optim: adamw_bnb_8bit   # int8 optimizer state; needs bitsandbytes (Linux/macOS)
+  report_to: wandb   # needs the wandb extra + `wandb login` (or WANDB_MODE=offline)
   run_name: hrm-arc-sft-full
