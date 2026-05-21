@@ -5,8 +5,7 @@ description = "NVARC ARC-AGI-2 pipeline adapted to use sapientinc/HRM-Text-1B"
 requires-python = ">=3.10"
 dependencies = [
     "torch>=2.3",
-    # HRM-Text-1B needs the hrm_text model class from transformers main.
-    "transformers @ git+https://github.com/huggingface/transformers.git@main",
+    "transformers>=5.9.0",
     "accelerate>=0.34",
     "peft>=0.13",
     "datasets>=2.20",
@@ -22,11 +21,6 @@ dependencies = [
     # marker skips it there — Windows users must pick a non-bnb optim.
     "bitsandbytes>=0.43; sys_platform != 'win32'",
 ]
-
-[project.optional-dependencies]
-# NOTE: no `flash` extra — HRM runs with prefix_lm=True, whose 4-D PrefixLM
-# attention mask cannot be represented by FlashAttention. Configs use
-# flex_attention, which is built into PyTorch and needs no extra dependency.
 
 [tool.uv]
 # Pin to the same Python the rest of the repo uses (see ../.venv/pyvenv.cfg).

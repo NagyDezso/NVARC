@@ -29,11 +29,31 @@ import argparse
 import os
 from pathlib import Path
 
-from datasets import load_from_disk, Dataset
-from transformers import AutoTokenizer
-from tqdm import tqdm
+# Each `datasets.map` worker tokenizes single-threaded; the Rust tokenizer's
+# own thread pool would oversubscribe cores across `num_proc` processes.
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
-from serialize import build_sample, DEFAULT_CONDITION
+from datasets import load_from_disk
+from transformers import AutoTokenizer
+
+from serialize import encode_sample, DEFAULT_CONDITION
+
+
+def _tokenize_batch(batch: dict, tokenizer) -> dict:
+    """``datasets.map`` worker: tokenize a batch of rows.
+
+    Runs once per shard in each ``num_proc`` worker process. ``encode_sample``
+    never drops — the ``length`` column is filtered against ``max_length``
+    afterwards so drop statistics can be reported.
+    """
+    out = {"input_ids": [], "token_type_ids": [], "labels": [], "length": []}
+    for messages in batch["messages"]:
+        s = encode_sample(messages, tokenizer, DEFAULT_CONDITION)
+        out["input_ids"].append(s.input_ids)
+        out["token_type_ids"].append(s.token_type_ids)
+        out["labels"].append(s.labels)
+        out["length"].append(len(s))
+    return out
 
 
 def process_subset(
@@ -43,7 +63,9 @@ def process_subset(
     max_length: int,
     max_per_subset: int | None = None,
     seed: int = 42,
-) -> None:
+    num_proc: int = 1,
+) -> tuple[int, int]:
+    """Tokenize one subset. Returns (n_kept, n_dropped)."""
     ds = load_from_disk(str(in_path))
     print(f"[{in_path.name}] loaded {len(ds)} rows")
 
@@ -53,32 +75,39 @@ def process_subset(
         ds = ds.shuffle(seed=seed).select(range(max_per_subset))
         print(f"[{in_path.name}] capped to {len(ds)} rows (--max_per_subset)")
 
-    rows = []
-    n_dropped = 0
-    for row in tqdm(ds, desc=in_path.name):
-        sample = build_sample(
-            messages=row["messages"],
-            tokenizer=tokenizer,
-            condition=DEFAULT_CONDITION,
-            max_length=max_length,
-        )
-        if sample is None:
-            n_dropped += 1
-            continue
-        rows.append({
-            "input_ids": sample.input_ids,
-            "token_type_ids": sample.token_type_ids,
-            "labels": sample.labels,
-            "length": len(sample),
-            "puzzle_name": row["puzzle_name"],
-        })
+    # Tokenize in parallel: `num_proc` worker processes, each batch-encoding
+    # rows. The expensive part is `encode_sample`; `datasets.map` shards the
+    # table across processes and caches the result on disk.
+    ds = ds.map(
+        _tokenize_batch,
+        batched=True,
+        num_proc=num_proc if len(ds) >= num_proc else 1,
+        fn_kwargs={"tokenizer": tokenizer},
+        remove_columns=["messages"],
+        desc=f"tokenize {in_path.name}",
+    )
+
+    # `encode_sample` never drops; apply the max_length cap here so we can
+    # report how far over budget the dropped rows ran.
+    lengths = ds["length"]
+    keep_idx = [i for i, n in enumerate(lengths) if n <= max_length]
+    dropped_lengths = sorted(n for n in lengths if n > max_length)
+    n_dropped = len(dropped_lengths)
 
     if n_dropped:
-        print(f"[{in_path.name}] dropped {n_dropped} samples exceeding max_length={max_length}")
+        n_total = len(lengths)
+        pct = 100.0 * n_dropped / n_total
+        print(f"[{in_path.name}] dropped {n_dropped}/{n_total} samples "
+              f"({pct:.1f}%) exceeding max_length={max_length}; "
+              f"dropped token lengths: min={dropped_lengths[0]} "
+              f"max={dropped_lengths[-1]} "
+              f"median={dropped_lengths[n_dropped // 2]}")
 
+    ds = ds.select(keep_idx)
     out_path.mkdir(parents=True, exist_ok=True)
-    Dataset.from_list(rows).save_to_disk(str(out_path))
-    print(f"[{in_path.name}] wrote {len(rows)} rows -> {out_path}")
+    ds.save_to_disk(str(out_path))
+    print(f"[{in_path.name}] wrote {len(ds)} rows -> {out_path}")
+    return len(ds), n_dropped
 
 
 def main() -> None:
@@ -96,6 +125,8 @@ def main() -> None:
                     help="Shuffle seed used when --max_per_subset caps a subset")
     ap.add_argument("--subsets", nargs="*", default=None,
                     help="Optional explicit subset names; default = every subdir")
+    ap.add_argument("--num_proc", type=int, default=os.cpu_count() or 1,
+                    help="Worker processes for tokenization (default: all CPUs)")
     args = ap.parse_args()
 
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, trust_remote_code=True)
@@ -116,11 +147,21 @@ def main() -> None:
     out_dir = Path(args.out_dir)
 
     subsets = args.subsets or sorted([p.name for p in in_dir.iterdir() if p.is_dir()])
+    total_kept = 0
+    total_dropped = 0
     for name in subsets:
-        process_subset(
+        n_kept, n_dropped = process_subset(
             in_dir / name, out_dir / name, tokenizer, args.max_length,
             max_per_subset=args.max_per_subset, seed=args.seed,
+            num_proc=args.num_proc,
         )
+        total_kept += n_kept
+        total_dropped += n_dropped
+
+    n_total = total_kept + total_dropped
+    pct = 100.0 * total_dropped / n_total if n_total else 0.0
+    print(f"[total] wrote {total_kept} rows, dropped {total_dropped}/{n_total} "
+          f"({pct:.1f}%) exceeding max_length={args.max_length}")
 
 
 if __name__ == "__main__":

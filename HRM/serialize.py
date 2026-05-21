@@ -67,19 +67,19 @@ class Sample:
         return len(self.input_ids)
 
 
-def build_sample(
+def encode_sample(
     messages: Sequence[dict],
     tokenizer,
     condition: str = DEFAULT_CONDITION,
-    max_length: int | None = None,
-) -> Sample | None:
+) -> Sample:
     """Tokenize an ARChitects-style message list into an HRM PrefixLM sample.
 
     ``messages`` alternates user/assistant; the *final* assistant message is
     the prediction target. All earlier user/assistant messages become the
     bidirectional prefix (demonstrations + test input).
 
-    Returns None if the encoded length exceeds ``max_length``.
+    Always returns the Sample regardless of length — callers that need a
+    length cap should use ``build_sample`` or check ``len(sample)``.
     """
     assert len(messages) >= 2 and len(messages) % 2 == 0, \
         f"need an even count of alternating user/assistant messages, got {len(messages)}"
@@ -116,10 +116,23 @@ def build_sample(
     token_type_ids = [1] * len(prompt_ids) + [0] * len(target_ids)
     labels = [-100] * len(prompt_ids) + list(target_ids)
 
-    if max_length is not None and len(input_ids) > max_length:
-        return None
-
     return Sample(input_ids=input_ids, token_type_ids=token_type_ids, labels=labels)
+
+
+def build_sample(
+    messages: Sequence[dict],
+    tokenizer,
+    condition: str = DEFAULT_CONDITION,
+    max_length: int | None = None,
+) -> Sample | None:
+    """``encode_sample`` with a length cap.
+
+    Returns None if the encoded length exceeds ``max_length``.
+    """
+    sample = encode_sample(messages, tokenizer, condition)
+    if max_length is not None and len(sample) > max_length:
+        return None
+    return sample
 
 
 def build_inference_prompt(

@@ -1442,7 +1442,7 @@ requires-dist = [
     { name = "safetensors", specifier = ">=0.4" },
     { name = "torch", specifier = ">=2.3" },
     { name = "tqdm" },
-    { name = "transformers", git = "https://github.com/huggingface/transformers.git?rev=main" },
+    { name = "transformers", specifier = ">=5.9.0" },
     { name = "wandb", specifier = ">=0.17" },
 ]
 
@@ -2735,8 +2735,8 @@ wheels = [
 
 [[package]]
 name = "transformers"
-version = "5.8.0.dev0"
-source = { git = "https://github.com/huggingface/transformers.git?rev=main#a0fb01c6cda2301cb54de0efde5fac405836c4fe" }
+version = "5.9.0"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "huggingface-hub" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -2748,6 +2748,10 @@ dependencies = [
     { name = "tokenizers" },
     { name = "tqdm" },
     { name = "typer" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/51/58/7f843608f2e8421f86bb97060b54649be6239ec612b82bf9d41e65c26c00/transformers-5.9.0.tar.gz", hash = "sha256:25997cb8fa6053533171634b6162d7df54346530ec2aa9b42bb834e63668c842", size = 8642240, upload-time = "2026-05-20T14:50:49.278Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/02/ca/2eaa5359f2ccb8c2e1656bc26305ad0cf438aa392ce4b29ae67a315c186e/transformers-5.9.0-py3-none-any.whl", hash = "sha256:1d19509bcff7028ebc6b277d71caa712e8353778463d38764237d14b42b52788", size = 10787648, upload-time = "2026-05-20T14:50:45.337Z" },
 ]
 
 [[package]]
