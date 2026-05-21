@@ -51,7 +51,8 @@ def main() -> None:
     ap.add_argument("--time-budget-hours", type=float, default=11.5)
     ap.add_argument("--num-workers", type=int, default=0,
                     help="0 = one worker per visible GPU (min 1)")
-    ap.add_argument("--max-seq-length", type=int, default=8192)
+    ap.add_argument("--max-seq-length", type=int, default=4096,
+                    help="HRM-Text-1B context window; do not exceed 4096")
     ap.add_argument("--decode-batch", type=int, default=4,
                     help="augmentations decoded together; lower it if the "
                          "recurrent KV cache OOMs")

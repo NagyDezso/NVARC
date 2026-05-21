@@ -279,7 +279,7 @@ def build_lora(model, r=256, alpha=32, dropout=0.0,
 
 
 def test_time_train(model, tokenizer, formatter, puzzle_ds, *,
-                    n_aug=16, lr=5e-5, max_length=8192, seed=1, device="cuda"):
+                    n_aug=16, lr=5e-5, max_length=4096, seed=1, device="cuda"):
     """Fine-tune the (already LoRA-wrapped) model on augmented demo pairs.
 
     Each augmented puzzle variant contributes one PrefixLM sample: its train
@@ -305,6 +305,13 @@ def test_time_train(model, tokenizer, formatter, puzzle_ds, *,
         return model
 
     model.train()
+    # HRM's forward re-applies 32 layers H_cycles*L_cycles times; without
+    # gradient checkpointing every recurrent activation is retained for the
+    # backward pass and a single seq-4096 sample needs tens of GB.
+    # enable_input_require_grads is required for checkpointing to propagate
+    # gradients into a LoRA adapter sitting on an otherwise-frozen base.
+    model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+    model.enable_input_require_grads()
     opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=lr)
     total = len(samples)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=total)
@@ -322,6 +329,7 @@ def test_time_train(model, tokenizer, formatter, puzzle_ds, *,
             attention_mask=torch.ones((1, len(s.input_ids)), dtype=torch.long, device=device),
             token_type_ids=torch.tensor([s.token_type_ids], dtype=torch.long, device=device),
             labels=torch.tensor([s.labels], dtype=torch.long, device=device),
+            use_cache=False,   # incompatible with gradient checkpointing
         )
         out.loss.backward()
         torch.nn.utils.clip_grad_norm_(
@@ -331,6 +339,8 @@ def test_time_train(model, tokenizer, formatter, puzzle_ds, *,
         if step + 1 >= warmup:
             sched.step()
 
+    # Decoding needs the KV cache, which checkpointing disables.
+    model.gradient_checkpointing_disable()
     model.eval()
     return model
 
@@ -345,7 +355,7 @@ def _grid(g):
 # ----------------------------------------------------------------------------
 
 def solve_puzzle(model, tokenizer, formatter, puzzle_ds, *,
-                 max_seq_length=8192, max_new_tokens=None, max_score=None,
+                 max_seq_length=4096, max_new_tokens=None, max_score=None,
                  decode_batch=4, end_time=float("inf"), device="cuda"):
     """Decode + score one puzzle (TTT must already have been applied).
 
@@ -474,7 +484,7 @@ def load_model_and_tokenizer(base, checkpoint=None, dtype=torch.bfloat16, device
 
 
 def worker(rank, queue, end_time, *, base, checkpoint, tasks_path,
-           out_dir, max_seq_length=8192, decode_batch=4,
+           out_dir, max_seq_length=4096, decode_batch=4,
            lora_r=256, ttt_lr=5e-5, ttt_aug=16, device="cuda"):
     """Pull puzzle keys off `queue`, solve each, dump candidates to `out_dir`."""
     from peft import get_peft_model_state_dict, set_peft_model_state_dict
