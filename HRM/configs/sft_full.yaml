@@ -50,12 +50,16 @@ training:
   max_steps: -1
   per_device_train_batch_size: 1
   per_device_eval_batch_size: 1
-  gradient_accumulation_steps: 32
-  # Full FT is more sensitive than LoRA — lower LR, longer warmup.
-  learning_rate: 1.0e-5
+  # Effective batch 256 (= bs1 x grad-accum 256) matches the NVARC production
+  # run (run_sft_4b.sh: train_global_batch_size=256). Accumulation is free on
+  # memory — it just trades optimizer-step frequency for gradient quality.
+  gradient_accumulation_steps: 256
+  # LR scaled up with the 8x larger effective batch (was 1e-5 @ batch 32).
+  # 5e-5 is conservative vs production's 1e-4 since HRM is smaller + recurrent.
+  learning_rate: 5.0e-5
   min_lr: 1.0e-7
   weight_decay: 0.1
-  warmup_steps: 400
+  warmup_steps: 200
   # A full epoch over ~3.2M samples is weeks on a 4090, so this run is meant
   # to be stopped early (Ctrl+C; a checkpoint lands every save_steps). A
   # constant LR means any stopping point is a valid endpoint — there is no
