@@ -19,11 +19,14 @@ changes — point ``--model`` at it for ``train_sft.py`` and ``run_inference.py`
     bos/eos/pad ids rewritten;
   * the custom ``*.py`` modeling code is copied verbatim.
 
+The keep set is fixed: ARC grids serialize to nothing but digits and newlines
+(see ``serialize.grid_to_text``), so no dataset scan is needed — the kept ids
+are the digits, the newline, and the special/condition tokens.
+
 Usage:
     uv run --project HRM python HRM/prepare_tokenizer.py \\
         --model sapientinc/HRM-Text-1B \\
-        --out_dir models/HRM-Text-1B-arc \\
-        --scan_dir data/grids_v15        # optional, for extra paranoia
+        --out_dir models/HRM-Text-1B-arc
 
 Surgery is done on the safetensors state dict directly: every tensor whose
 leading dim equals the vocab size is selected. This is robust to whatever HRM
@@ -37,7 +40,6 @@ import argparse
 import glob
 import json
 import os
-import random
 import shutil
 
 import torch
@@ -66,8 +68,14 @@ REQUIRED_NAMED_TOKENS = [
 ]
 
 
-def build_keep_set(tokenizer, scan_dir: str | None) -> set[int]:
-    """Collect every token id ARC text can produce, plus required specials."""
+def build_keep_set(tokenizer) -> set[int]:
+    """The fixed set of token ids ARC serialization can ever produce.
+
+    ARC grids serialize to nothing but digits and newlines (see
+    ``serialize.grid_to_text``), so the keep set is fully determined and needs
+    no dataset scan. It is: every special token, the named condition/turn
+    tokens, and the digit + newline tokens of the grid body.
+    """
     keep: set[int] = set()
 
     # All registered special tokens (bos/eos/pad/unk, <|im_*|>, tags, ...).
@@ -81,13 +89,12 @@ def build_keep_set(tokenizer, scan_dir: str | None) -> set[int]:
             raise SystemExit(f"error: required token {name!r} is not in the tokenizer")
         keep.add(tid)
 
-    # Grid body tokens. A synthetic battery of random grids across every size
-    # covers all ten digits and the newline regardless of tokenizer merges.
-    rng = random.Random(0)
-    for _ in range(400):
-        h, w = rng.randint(1, 30), rng.randint(1, 30)
-        grid = [[rng.randint(0, 9) for _ in range(w)] for _ in range(h)]
-        keep.update(tokenizer.encode(grid_to_text(grid), add_special_tokens=False))
+    # Grid body: digits 0-9 and the row-separating newline. A single fixed
+    # two-row grid spanning all ten digits yields every grid-body token id.
+    keep.update(tokenizer.encode(
+        grid_to_text([[0, 1, 2, 3, 4], [5, 6, 7, 8, 9]]),
+        add_special_tokens=False,
+    ))
 
     # ARC relies on each digit being its own token (1:1 grid mapping).
     for d in "0123456789":
@@ -95,25 +102,6 @@ def build_keep_set(tokenizer, scan_dir: str | None) -> set[int]:
         if n != 1:
             print(f"warning: digit {d!r} tokenizes to {n} tokens, not 1 "
                   f"(grids will not be 1:1 with cells)")
-
-    # Optional: union with tokens found in real serialized datasets.
-    if scan_dir:
-        from datasets import load_from_disk
-        for path in sorted(glob.glob(os.path.join(scan_dir, "*"))):
-            if not os.path.isdir(path):
-                continue
-            try:
-                ds = load_from_disk(path)
-            except Exception:
-                continue
-            if "messages" not in ds.column_names:
-                continue
-            for row in ds:
-                for msg in row["messages"]:
-                    keep.update(
-                        tokenizer.encode(msg["content"], add_special_tokens=False)
-                    )
-            print(f"scanned {path}: keep set now {len(keep)} tokens")
 
     return keep
 
@@ -276,9 +264,6 @@ def main() -> None:
                     help="HF hub id or local path of the base HRM model")
     ap.add_argument("--out_dir", required=True,
                     help="destination directory for the cut model")
-    ap.add_argument("--scan_dir", default=None,
-                    help="optional dir of HF datasets (grids_v15/*) to union "
-                         "real token ids into the keep set")
     ap.add_argument("--no_verify", action="store_true",
                     help="skip the post-cut tokenizer+model agreement check")
     args = ap.parse_args()
@@ -293,7 +278,7 @@ def main() -> None:
     tokenizer = AutoTokenizer.from_pretrained(src, trust_remote_code=True)
     old_vocab_size = len(tokenizer)
 
-    keep = build_keep_set(tokenizer, args.scan_dir)
+    keep = build_keep_set(tokenizer)
     kept_ids = sorted(keep)
     old_to_new = {old: new for new, old in enumerate(kept_ids)}
     new_vocab_size = len(kept_ids)

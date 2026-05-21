@@ -63,6 +63,13 @@ def main() -> None:
                     help="solve only the first N puzzles (debugging)")
     args = ap.parse_args()
 
+    # Fail fast on bad paths: the run can take hours, so validate inputs
+    # before queuing any work rather than crashing in the selection stage.
+    if not os.path.exists(args.tasks):
+        ap.error(f"--tasks path does not exist: {args.tasks}")
+    if args.solutions is not None and not os.path.isfile(args.solutions):
+        ap.error(f"--solutions file does not exist: {args.solutions}")
+
     end_time = time.time() + args.time_budget_hours * 3600 - 600
 
     # Collect puzzle keys.

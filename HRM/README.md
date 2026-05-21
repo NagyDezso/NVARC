@@ -52,74 +52,55 @@ DFS branches.
 This project uses [`uv`](https://docs.astral.sh/uv/) for environment / dependency management. All commands assume you're at the repo root.
 
 ```bash
-# 0. Create/sync the venv from HRM/pyproject.toml.
+# 0. Create/sync the venv.
 uv sync --project HRM
-#    4-/8-bit optimizers (bitsandbytes) install by default on Linux/macOS.
-#    On Windows there are no bnb wheels — pick a non-bnb optim in the config.
-#    wandb logging is on by default (report_to: wandb in every config).
-#    Run `wandb login` first, or `wandb offline` / WANDB_MODE=offline to
-#    skip the cloud. Set report_to: none in the config to disable entirely.
-#    Attention: configs use flex_attention (built into PyTorch, no extra deps).
-#    HRM's prefix_lm=True is incompatible with flash_attention_2 — its 4-D
-#    PrefixLM mask cannot be represented by FlashAttention. Use flex_attention
-#    (default) or sdpa.
 
-# 1. Fetch NVARC augmented-puzzle datasets from Kaggle (~3.2M puzzles, large).
-#    This skips the SDG regeneration step entirely.
+# 1. Fetch NVARC augmented-puzzle datasets from Kaggle.
 bash HRM/download_data.sh                # writes to data/grids_v15/
-#    Alternatively, regenerate from scratch:
-#    uv run --project HRM python SDG/scripts/build_datasets.py
 
-# 2. (Optional) Cut HRM's 65k vocabulary down to the ~few-dozen tokens ARC
-#    uses. Writes a drop-in cut model; saves ~100M embedding params. If you do
-#    this, pass the cut dir downstream: --tokenizer / model.name_or_path /
-#    --base all point at models/HRM-Text-1B-arc instead of sapientinc/HRM-Text-1B.
-#    The keep-set is built from a synthetic grid battery; --scan_dir adds every
-#    token id found in the real datasets too (belt-and-braces, needs step 1).
+# 2. (Optional) Cut HRM's 65k vocab to the few-dozen tokens ARC uses.
 uv run --project HRM python HRM/prepare_tokenizer.py \
     --model sapientinc/HRM-Text-1B \
-    --out_dir models/HRM-Text-1B-arc \
-    --scan_dir data/grids_v15
+    --out_dir models/HRM-Text-1B-arc
 
-# 3. Tokenize into HRM PrefixLM tensors (one-off, CPU-only).
-#    Budget run: --max_per_subset caps each source for a ~1-2 day 4090 run.
-#    Add --tokenizer models/HRM-Text-1B-arc if you ran step 2.
+# 3. Tokenize into HRM PrefixLM tensors (drop --max_per_subset for the full run).
 uv run --project HRM python HRM/prepare_data.py \
     --in_dir data/grids_v15 \
     --out_dir data/hrm_v1_small \
     --max_per_subset 12000 \
     --max_length 4096
-#    Full run (~3.2M samples, weeks of 4090 time): drop --max_per_subset and
-#    use --out_dir data/hrm_v1.
 
-# 4. Sanity-check the model loads + forward + generate works
+# 4. Sanity-check the model loads + forward + generate works.
 uv run --project HRM python HRM/smoke_test.py
 
-# 5. Optional Trainer smoke test (2 steps on val)
-uv run --project HRM python HRM/train_sft.py --config HRM/configs/sft_lora.yaml --smoke_test
-
-# 6. SFT — single GPU (no accelerate launch needed). Pick a config:
-#    sft_lora.yaml        LoRA, fast, easiest. data/hrm_v1*
-#    sft_full_small.yaml  full FT on the budget mix (~1-2 days)
-#    sft_full.yaml        full FT on the complete 3.2M set (weeks on a 4090)
+# 5. SFT — single GPU. Pick a config (sft_lora / sft_full_small / sft_full).
 uv run --project HRM python HRM/train_sft.py --config HRM/configs/sft_full_small.yaml
-#    Multi-GPU only: wrap with accelerate launch instead:
-#    uv run --project HRM accelerate launch HRM/train_sft.py --config HRM/configs/sft_full_small.yaml
 
-# 7. Inference — per-puzzle solver (TTT → turbo-DFS → scoring → selection)
+# 6. Inference — per-puzzle solver (TTT → turbo-DFS → scoring → selection).
 uv run --project HRM python HRM/run_inference.py \
     --checkpoint checkpoints/hrm-arc \
-    --tasks external/ARC-AGI-2/data/evaluation \
-    --solutions external/ARC-AGI-2/data/evaluation_solutions.json \
+    --tasks data/arc-prize-2025/arc-agi_evaluation_challenges.json \
+    --solutions data/arc-prize-2025/arc-agi_evaluation_solutions.json \
     --out submission.json \
     --time-budget-hours 11 \
     --decode-batch 4
-#    --decode-batch: augmentations decoded together. HRM's recurrent KV cache is large (one slot per H/L-cycle invocation); lower this to 2 or 1 if you OOM. 
-#    --limit N solves only the first N puzzles for a fast smoke test.
 ```
 
 ## Notes
 
+- **Environment**: bitsandbytes (4-/8-bit optimizers) installs by default on
+  Linux/macOS; Windows has no wheels, so pick a non-bnb `optim` in the config.
+  wandb logging is on by default — `wandb login`, or `WANDB_MODE=offline` /
+  `report_to: none` to skip it. Configs use `flex_attention`; HRM's
+  `prefix_lm=True` is incompatible with `flash_attention_2` (its 4-D PrefixLM
+  mask can't be represented), so use `flex_attention` (default) or `sdpa`.
+- **Smoke tests**: `train_sft.py --smoke_test` runs 2 Trainer steps on val;
+  `run_inference.py --limit N` solves only the first N puzzles. `--decode-batch`
+  sets how many augmentations decode together — lower it to 2 or 1 if HRM's
+  large recurrent KV cache OOMs.
+- If you ran step 2, point `--tokenizer` / `model.name_or_path` / `--base` at
+  `models/HRM-Text-1B-arc` downstream. Datasets can be regenerated from scratch
+  with `SDG/scripts/build_datasets.py` instead of step 1.
 - HRM is **pre-alignment** — there is no instruction template. We define a minimal
   ARC-specific prompt format in `serialize.py`.
 - HRM expects `token_type_ids` to mark the prefix block. Without it, attention is
