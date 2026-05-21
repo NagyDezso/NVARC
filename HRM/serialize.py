@@ -127,6 +127,8 @@ def build_inference_prompt(
     test_input_grid: Grid,
     tokenizer,
     condition: str = DEFAULT_CONDITION,
+    *,
+    max_prompt_tokens: int | None = None,
 ) -> dict:
     """Build a tokenized prompt for ARC inference (no target).
 
@@ -134,27 +136,48 @@ def build_inference_prompt(
     ready to feed into ``model.generate``. The whole returned block is marked
     as prefix (token_type_ids = 1) — generated tokens will get token_type_ids
     = 0 appended by the generation loop.
+
+    If ``max_prompt_tokens`` is given and the full prompt would exceed it,
+    demonstration pairs are dropped from the front (oldest first) until it
+    fits. The test-input block is never dropped. ``num_demos_used`` reports
+    how many demo pairs survived.
     """
     im_start = tokenizer.convert_tokens_to_ids(TURN_START_TOKEN)
     im_end   = tokenizer.convert_tokens_to_ids(TURN_END_TOKEN)
     eos_id   = tokenizer.eos_token_id
     cond_ids = tokenizer.encode(condition, add_special_tokens=False)
 
-    ids: list[int] = []
-    for pair in demo_pairs:
-        ids.append(im_start)
-        ids.extend(cond_ids)
-        ids.extend(tokenizer.encode(grid_to_text(pair["input"]), add_special_tokens=False))
-        ids.append(im_end)
-        ids.extend(tokenizer.encode(grid_to_text(pair["output"]), add_special_tokens=False))
-        ids.append(eos_id)
-    # Test input + open assistant block.
-    ids.append(im_start)
-    ids.extend(cond_ids)
-    ids.extend(tokenizer.encode(grid_to_text(test_input_grid), add_special_tokens=False))
-    ids.append(im_end)
+    def encode_demo(pair) -> list[int]:
+        out = [im_start, *cond_ids]
+        out.extend(tokenizer.encode(grid_to_text(pair["input"]), add_special_tokens=False))
+        out.append(im_end)
+        out.extend(tokenizer.encode(grid_to_text(pair["output"]), add_special_tokens=False))
+        out.append(eos_id)
+        return out
+
+    # Test input + open assistant block — always kept.
+    tail: list[int] = [im_start, *cond_ids]
+    tail.extend(tokenizer.encode(grid_to_text(test_input_grid), add_special_tokens=False))
+    tail.append(im_end)
+
+    demos = [encode_demo(p) for p in demo_pairs]
+    if max_prompt_tokens is not None:
+        budget = max_prompt_tokens - len(tail)
+        # Keep the most recent demos that fit within the budget.
+        kept: list[list[int]] = []
+        used = 0
+        for demo in reversed(demos):
+            if used + len(demo) > budget:
+                break
+            kept.append(demo)
+            used += len(demo)
+        demos = list(reversed(kept))
+
+    ids: list[int] = [tok for demo in demos for tok in demo]
+    ids.extend(tail)
 
     return {
         "input_ids": ids,
         "token_type_ids": [1] * len(ids),
+        "num_demos_used": len(demos),
     }

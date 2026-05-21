@@ -13,9 +13,12 @@ Smoke test (no accelerate, runs 2 steps on the val set):
 from __future__ import annotations
 
 import argparse
+import inspect
 import os
+import shutil
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -25,9 +28,47 @@ from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     Trainer,
+    TrainerCallback,
     TrainingArguments,
     set_seed,
 )
+
+
+def _custom_code_dir(model) -> Path | None:
+    """Locate the directory holding HRM's trust_remote_code .py files.
+
+    The HRM architecture is loaded dynamically; its source lives in the HF
+    modules cache. We resolve it from the (base) model class file.
+    """
+    cls = model
+    if hasattr(cls, "get_base_model"):       # unwrap PEFT
+        cls = cls.get_base_model()
+    src = Path(inspect.getfile(cls.__class__))
+    return src.parent if src.is_file() else None
+
+
+class SaveCustomCodeCallback(TrainerCallback):
+    """Copy HRM's trust_remote_code .py files into every saved checkpoint.
+
+    HF Trainer checkpoints otherwise omit `modeling_hrm_text.py` /
+    `configuration_hrm_text.py`, so `from_pretrained(checkpoint)` cannot
+    resolve the custom architecture. Copying them in makes each checkpoint
+    self-contained — the config's bare `auto_map` (e.g.
+    "modeling_hrm_text.HRMTextForCausalLM") then resolves against the
+    checkpoint dir itself.
+    """
+
+    def __init__(self, src_dir: Path | None):
+        self.src_dir = src_dir
+
+    def _copy_into(self, dest: Path) -> None:
+        if self.src_dir is None or not dest.is_dir():
+            return
+        for py in self.src_dir.glob("*.py"):
+            shutil.copy2(py, dest / py.name)
+
+    def on_save(self, args, state, control, **kwargs):
+        self._copy_into(Path(args.output_dir) / f"checkpoint-{state.global_step}")
 
 
 @dataclass
@@ -170,12 +211,15 @@ def main() -> None:
     print(f"train rows: {len(train_ds)}, eval rows: {len(eval_ds)}")
 
     collator = PrefixLMCollator(pad_token_id=pad_id)
+    code_dir = _custom_code_dir(model)
+    callbacks = [SaveCustomCodeCallback(code_dir)] if not args.smoke_test else []
     trainer = Trainer(
         model=model,
         args=TrainingArguments(**training_args_kwargs),
         train_dataset=train_ds,
         eval_dataset=eval_ds,
         data_collator=collator,
+        callbacks=callbacks,
     )
 
     # --resume: True -> let Trainer auto-find the latest checkpoint in
@@ -186,6 +230,8 @@ def main() -> None:
     if not args.smoke_test:
         trainer.save_model(cfg.training.output_dir)
         tokenizer.save_pretrained(cfg.training.output_dir)
+        # Final save isn't a checkpoint-N dir, so copy the custom code here too.
+        SaveCustomCodeCallback(code_dir)._copy_into(Path(cfg.training.output_dir))
 
 
 if __name__ == "__main__":

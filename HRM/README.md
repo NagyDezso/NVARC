@@ -29,47 +29,23 @@ ARChitects "ARC-as-text" formulation.
 | Vocab cut step | `cut_tokenizer.ipynb` (16 surviving tokens) | `prepare_tokenizer.py` (digits + newline + specials) |
 | Test-time fine-tune | LoRA / Unsloth | LoRA via PEFT |
 
-## Layout
+## Inference
 
-```
-HRM/
-├── README.md              ← you are here
-├── pyproject.toml         ← deps, managed by uv
-├── configs/
-│   ├── sft_lora.yaml      ← LoRA SFT (default, easiest)
-│   ├── sft_full.yaml      ← full fine-tune, 8-bit Adam
-│   └── sft_full_small.yaml ← full fine-tune on a capped subset
-├── prepare_tokenizer.py   ← (optional) shrink HRM embedding to ARC-only tokens
-├── prepare_data.py        ← convert NVARC `grids_v15/*` to HRM PrefixLM samples
-├── serialize.py           ← grid <-> text + PrefixLM mask construction
-├── train_sft.py           ← single-node multi-GPU SFT loop (HF + accelerate)
-├── infer.py               ← inference on ARC-AGI eval set
-└── ttft.py                ← test-time fine-tuning per-puzzle (LoRA)
-```
+`run_inference.py` runs the per-puzzle ARChitects-style solver. Per puzzle it:
 
-## Pipeline
+1. **TTT** — resets a LoRA adapter and fine-tunes it on 16×8 dihedral+colour
+   augmentations of the puzzle's demonstration pairs (`arc_solver.test_time_train`);
+2. **turbo-DFS decode** — depth-first search over the token tree, batched across
+   augmentations, pruned by cumulative NLL (`max_score = -log(0.2)`)
+   (`arc_solver.turbo_dfs`);
+3. **augmentation scoring** — re-scores every candidate grid as the *answer*
+   under 8 fresh augmentations (`arc_solver.calc_scores`);
+4. **selection** — groups identical grids and ranks them with
+   `score_full_probmul_3` / `score_kgmon` (`arc_decoder.py`), picking top-2.
 
-```
-NVARC SDG  →  data/grids_v15/{arc2_training, mini, concept, rearc, nvarc_*}
-              │
-              ▼
-       HRM/prepare_data.py        (serialize messages → token_ids + token_type_ids)
-              │
-              ▼
-       data/hrm_v1/{train, val}
-              │
-              ▼
-       HRM/train_sft.py           (HF Trainer, PrefixLM loss, optional LoRA)
-              │
-              ▼
-       checkpoints/hrm-arc/
-              │
-              ▼
-       HRM/infer.py + HRM/ttft.py (per-puzzle LoRA fine-tune, then sample)
-              │
-              ▼
-       submission.json
-```
+PrefixLM `token_type_ids` are threaded through TTT, decode and scoring;
+`turbo_dfs` uses `DynamicCache.crop()` to restore the KV cache between sibling
+DFS branches.
 
 ## Quickstart
 
@@ -94,8 +70,20 @@ bash HRM/download_data.sh                # writes to data/grids_v15/
 #    Alternatively, regenerate from scratch:
 #    uv run --project HRM python SDG/scripts/build_datasets.py
 
-# 2. Tokenize into HRM PrefixLM tensors (one-off, CPU-only).
+# 2. (Optional) Cut HRM's 65k vocabulary down to the ~few-dozen tokens ARC
+#    uses. Writes a drop-in cut model; saves ~100M embedding params. If you do
+#    this, pass the cut dir downstream: --tokenizer / model.name_or_path /
+#    --base all point at models/HRM-Text-1B-arc instead of sapientinc/HRM-Text-1B.
+#    The keep-set is built from a synthetic grid battery; --scan_dir adds every
+#    token id found in the real datasets too (belt-and-braces, needs step 1).
+uv run --project HRM python HRM/prepare_tokenizer.py \
+    --model sapientinc/HRM-Text-1B \
+    --out_dir models/HRM-Text-1B-arc \
+    --scan_dir data/grids_v15
+
+# 3. Tokenize into HRM PrefixLM tensors (one-off, CPU-only).
 #    Budget run: --max_per_subset caps each source for a ~1-2 day 4090 run.
+#    Add --tokenizer models/HRM-Text-1B-arc if you ran step 2.
 uv run --project HRM python HRM/prepare_data.py \
     --in_dir data/grids_v15 \
     --out_dir data/hrm_v1_small \
@@ -104,25 +92,30 @@ uv run --project HRM python HRM/prepare_data.py \
 #    Full run (~3.2M samples, weeks of 4090 time): drop --max_per_subset and
 #    use --out_dir data/hrm_v1.
 
-# 3. Sanity-check the model loads + forward + generate works
+# 4. Sanity-check the model loads + forward + generate works
 uv run --project HRM python HRM/smoke_test.py
 
-# 4. Optional Trainer smoke test (2 steps on val)
+# 5. Optional Trainer smoke test (2 steps on val)
 uv run --project HRM python HRM/train_sft.py --config HRM/configs/sft_lora.yaml --smoke_test
 
-# 5. SFT — single GPU (no accelerate launch needed). Pick a config:
+# 6. SFT — single GPU (no accelerate launch needed). Pick a config:
 #    sft_lora.yaml        LoRA, fast, easiest. data/hrm_v1*
-#    sft_full_small.yaml  full FT on the budget mix (faithful NVARC, ~1-2 days)
+#    sft_full_small.yaml  full FT on the budget mix (~1-2 days)
 #    sft_full.yaml        full FT on the complete 3.2M set (weeks on a 4090)
 uv run --project HRM python HRM/train_sft.py --config HRM/configs/sft_full_small.yaml
 #    Multi-GPU only: wrap with accelerate launch instead:
 #    uv run --project HRM accelerate launch HRM/train_sft.py --config HRM/configs/sft_full_small.yaml
 
-# 6. Eval / submission
-uv run --project HRM python HRM/infer.py \
+# 7. Inference — per-puzzle solver (TTT → turbo-DFS → scoring → selection)
+uv run --project HRM python HRM/run_inference.py \
     --checkpoint checkpoints/hrm-arc \
     --tasks external/ARC-AGI-2/data/evaluation \
-    --out submission.json
+    --solutions external/ARC-AGI-2/data/evaluation_solutions.json \
+    --out submission.json \
+    --time-budget-hours 11 \
+    --decode-batch 4
+#    --decode-batch: augmentations decoded together. HRM's recurrent KV cache is large (one slot per H/L-cycle invocation); lower this to 2 or 1 if you OOM. 
+#    --limit N solves only the first N puzzles for a fast smoke test.
 ```
 
 ## Notes
@@ -130,12 +123,16 @@ uv run --project HRM python HRM/infer.py \
 - HRM is **pre-alignment** — there is no instruction template. We define a minimal
   ARC-specific prompt format in `serialize.py`.
 - HRM expects `token_type_ids` to mark the prefix block. Without it, attention is
-  fully causal and logits degrade noticeably. `prepare_data.py` and `infer.py`
+  fully causal and logits degrade noticeably. `prepare_data.py` and `arc_solver.py`
   both build this mask explicitly.
 - The HRM tokenizer condition tags `<|object_ref_start|>` (direct),
   `<|object_ref_end|>` (cot), `<|quad_start|>` (noisy), `<|quad_end|>` (synth)
   are *training-time* conditioning tags. We use `synth,cot` by default
   (`<|quad_end|><|object_ref_end|>`) to nudge structured/explained outputs.
+- **Vocabulary cut** (`prepare_tokenizer.py`, Quickstart step 2): HRM ships a
+  65,536-token vocab; ARC digit-grids use only a few dozen. Cutting it trims
+  ~100M params off the tied embedding, shrinks the logits matmul, and makes the
+  cut `embed_tokens`/`lm_head` small enough to LoRA the output head cheaply.
 - Hardware: both SFT modes run on a single 24 GB GPU (e.g. RTX 4090) at
   seq 4096 with plain `python` — no `accelerate launch` needed.
   - **LoRA** (`configs/sft_lora.yaml`) — the easy default. ~8–12 GB total.
