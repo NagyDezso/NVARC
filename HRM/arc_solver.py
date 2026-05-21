@@ -84,65 +84,125 @@ def _crop_cache(cache, length: int) -> None:
             cache.value_cache[i] = cache.value_cache[i][..., :length, :]
 
 
-@torch.no_grad()
-def turbo_dfs(model, logits, max_new_tokens, max_score, scores, pos, cache,
-              start_time, end_time, arc, time_budget=540) -> dict:
-    """Depth-first search over the token tree, batched across `n` live beams.
+class _DFSNode:
+    """One node of the turbo-DFS tree: a decode position and its open children.
 
-    `logits` are the next-token logits for each beam at position `pos-1`.
-    A child token is explored only while the beam's cumulative NLL stays below
-    `max_score`. Returns {beam_id: [(cumulative_nll, [token, ...]), ...]}.
+    `candidates[i]` is the score-sorted list of next tokens still to explore for
+    beam `i`. `suffixes` accumulates completed `(cumulative_nll, [token, ...])`
+    paths discovered at or below this node. `parent_tokens` is the token vector
+    the parent stepped to reach this node, prepended to every suffix on the way
+    back up.
+    """
+
+    __slots__ = ("pos", "max_new_tokens", "candidates", "suffixes",
+                 "parent", "parent_tokens")
+
+    def __init__(self, pos, max_new_tokens, candidates, suffixes,
+                 parent, parent_tokens):
+        self.pos = pos
+        self.max_new_tokens = max_new_tokens
+        self.candidates = candidates
+        self.suffixes = suffixes
+        self.parent = parent
+        self.parent_tokens = parent_tokens
+
+
+def _dfs_node(logits, scores, pos, max_new_tokens, max_score, arc,
+              parent, parent_tokens) -> _DFSNode:
+    """Build a DFS node from next-token `logits` and parent cumulative `scores`.
+
+    A token is opened as a child only while the beam's cumulative NLL stays
+    below `max_score`; a token equal to EOS completes a suffix immediately.
     """
     n = logits.size(0)
-    nll = torch.tensor(scores, dtype=torch.float32).view(n, 1) - logits.float().cpu().log_softmax(-1)
-
+    nll = torch.tensor(scores, dtype=torch.float32).view(n, 1) \
+        - logits.float().cpu().log_softmax(-1)
     suffixes = defaultdict(list)
     candidates = {}
     for i in range(n):
-        candidates[i] = []
+        cand = []
         for t in arc.tokens:
             score = nll[i, t].item()
             if score < max_score:
                 if t == arc.eos_id:
                     suffixes[i].append((score, [t]))
                 elif max_new_tokens > 1:
-                    candidates[i].append((score, t))
-        candidates[i].sort(key=lambda x: x[0])
+                    cand.append((score, t))
+        cand.sort(key=lambda x: x[0])
+        candidates[i] = cand
+    return _DFSNode(pos, max_new_tokens, candidates, suffixes,
+                    parent, parent_tokens)
 
-    while time.time() - start_time < time_budget and time.time() < end_time:
+
+def turbo_dfs(model, logits, max_new_tokens, max_score, scores, pos, cache,
+              start_time, end_time, arc, time_budget=540) -> dict:
+    """Depth-first search over the token tree, batched across `n` live beams.
+
+    Iterative (explicit stack): the search depth equals the grid's token length
+    (a 30x30 grid is ~930), which would overflow Python's recursion limit. One
+    batched decode step advances every beam by one token; `cache` is the single
+    shared KV cache, cropped back to a node's `pos` before each of its sibling
+    steps so branches do not contaminate each other.
+
+    `logits` are the next-token logits for each beam at position `pos-1`.
+    A child token is explored only while the beam's cumulative NLL stays below
+    `max_score`. Returns {beam_id: [(cumulative_nll, [token, ...]), ...]}.
+    """
+    n = logits.size(0)
+    root = _dfs_node(logits, scores, pos, max_new_tokens, max_score, arc,
+                     parent=None, parent_tokens=None)
+    stack = [root]
+    time_up = False
+
+    while stack:
+        node = stack[-1]
+        if not time_up and (time.time() - start_time >= time_budget
+                            or time.time() >= end_time):
+            time_up = True
+
+        # Pick one candidate per beam for this node's next sibling step.
         batch_tokens, batch_scores, num_alive = [], [], 0
-        for i in range(n):
-            if not candidates[i]:
-                batch_tokens.append(arc.pad_id)
-                batch_scores.append(1000.0)
-            else:
-                score, t = candidates[i].pop(0)
-                batch_tokens.append(t)
-                batch_scores.append(score)
-                num_alive += 1
-        if num_alive == 0:
-            break
+        if not time_up:
+            for i in range(n):
+                cand = node.candidates[i]
+                if cand:
+                    score, t = cand.pop(0)
+                    batch_tokens.append(t)
+                    batch_scores.append(score)
+                    num_alive += 1
+                else:
+                    batch_tokens.append(arc.pad_id)
+                    batch_scores.append(1000.0)
 
-        # Restore the cache to the parent state before stepping siblings.
-        _crop_cache(cache, pos)
+        if time_up or num_alive == 0:
+            # Node exhausted: pop it and fold its suffixes into the parent.
+            stack.pop()
+            if node.parent is not None:
+                for beam_id, beams in node.suffixes.items():
+                    for score, suffix_tokens in beams:
+                        suffix_tokens.insert(0, node.parent_tokens[beam_id])
+                        node.parent.suffixes[beam_id].append((score, suffix_tokens))
+            continue
+
+        # Descend: one batched decode step from this node's position.
+        _crop_cache(cache, node.pos)
         outputs = model(
-            input_ids=torch.tensor(batch_tokens, device=model.device, dtype=torch.long).view(-1, 1),
-            position_ids=torch.full((n, 1), pos, device=model.device, dtype=torch.long),
+            input_ids=torch.tensor(batch_tokens, device=model.device,
+                                   dtype=torch.long).view(-1, 1),
+            position_ids=torch.full((n, 1), node.pos, device=model.device,
+                                    dtype=torch.long),
             past_key_values=cache,
             use_cache=True,
             return_dict=True,
         )
-        next_suffixes = turbo_dfs(
-            model, outputs.logits[:, -1], max_new_tokens - 1, max_score,
-            batch_scores, pos + 1, outputs.past_key_values,
-            start_time, end_time, arc, time_budget,
-        )
-        for beam_id, beams in next_suffixes.items():
-            for score, suffix_tokens in beams:
-                suffix_tokens.insert(0, batch_tokens[beam_id])
-                suffixes[beam_id].append((score, suffix_tokens))
+        cache = outputs.past_key_values
+        stack.append(_dfs_node(
+            outputs.logits[:, -1], batch_scores, node.pos + 1,
+            node.max_new_tokens - 1, max_score, arc,
+            parent=node, parent_tokens=batch_tokens,
+        ))
 
-    return suffixes
+    return root.suffixes
 
 
 @torch.no_grad()
