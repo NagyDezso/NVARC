@@ -119,6 +119,37 @@ def encode_sample(
     return Sample(input_ids=input_ids, token_type_ids=token_type_ids, labels=labels)
 
 
+def fit_sample(
+    messages: Sequence[dict],
+    tokenizer,
+    condition: str = DEFAULT_CONDITION,
+    max_length: int | None = None,
+) -> tuple[Sample | None, int]:
+    """``encode_sample`` with a length cap, dropping oldest demos to fit.
+
+    ``messages`` alternates user/assistant; the final pair is the supervised
+    target and is never dropped. If the encoded sample exceeds ``max_length``,
+    demonstration pairs are removed from the front (oldest first), one pair at
+    a time, until it fits — the same policy ``build_inference_prompt`` applies
+    at inference, so train and inference see prompts shaped the same way.
+
+    Returns ``(sample, n_demos_dropped)``. ``sample`` is None only if the
+    final (test-input + target) pair alone still exceeds ``max_length``.
+    """
+    msgs = list(messages)
+    sample = encode_sample(msgs, tokenizer, condition)
+    if max_length is None:
+        return sample, 0
+    n_demos_dropped = 0
+    while len(sample) > max_length and len(msgs) > 2:
+        msgs = msgs[2:]            # drop the oldest demo (user+assistant) pair
+        n_demos_dropped += 1
+        sample = encode_sample(msgs, tokenizer, condition)
+    if len(sample) > max_length:
+        return None, n_demos_dropped
+    return sample, n_demos_dropped
+
+
 def build_sample(
     messages: Sequence[dict],
     tokenizer,
@@ -127,11 +158,10 @@ def build_sample(
 ) -> Sample | None:
     """``encode_sample`` with a length cap.
 
-    Returns None if the encoded length exceeds ``max_length``.
+    Drops oldest demonstration pairs to fit ``max_length`` (see ``fit_sample``).
+    Returns None only if the target pair alone exceeds ``max_length``.
     """
-    sample = encode_sample(messages, tokenizer, condition)
-    if max_length is not None and len(sample) > max_length:
-        return None
+    sample, _ = fit_sample(messages, tokenizer, condition, max_length)
     return sample
 
 
@@ -152,8 +182,9 @@ def build_inference_prompt(
 
     If ``max_prompt_tokens`` is given and the full prompt would exceed it,
     demonstration pairs are dropped from the front (oldest first) until it
-    fits. The test-input block is never dropped. ``num_demos_used`` reports
-    how many demo pairs survived.
+    fits — matching ``fit_sample``'s training-time policy. The test-input
+    block is never dropped. ``num_demos_used`` reports how many demo pairs
+    survived.
     """
     im_start = tokenizer.convert_tokens_to_ids(TURN_START_TOKEN)
     im_end   = tokenizer.convert_tokens_to_ids(TURN_END_TOKEN)

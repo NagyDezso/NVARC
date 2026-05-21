@@ -17,9 +17,12 @@
 ## Stop:                      Ctrl+C (lose at most save_steps of progress).
 ## Resume:                    add --resume  (auto-finds the latest checkpoint).
 ##
-## Memory budget (bf16, seq 4096, bs 1, grad-ckpt on):
-##   weights 2 GB + grads 2 GB + 8-bit Adam 2 GB + activations ~6-10 GB
-##   => ~12-16 GB, comfortable on 24 GB.
+## Memory budget (bf16, bs 1, grad-ckpt on):
+##   weights 2 GB + grads 2 GB + 8-bit Adam 2 GB + activations.
+##   At seq 4096 activations are ~6-10 GB => ~12-16 GB. This config now runs
+##   the context-extension SFT at seq 8192 (~2x); activations scale roughly
+##   linearly, so expect to approach or exceed 24 GB -- drop batch/seq or move
+##   to a larger GPU if it OOMs.
 
 model:
   name_or_path: sapientinc/HRM-Text-1B
@@ -40,7 +43,10 @@ data:
     - data/hrm_v1/nvarc_training
     - data/hrm_v1/nvarc_full
   val_dataset_path: data/hrm_v1/arc2_evaluation6
-  max_length: 4096
+  # Context-extension SFT: 8192 keeps 98.5% of samples / 99.4% of token mass;
+  # positions past it are too data-starved (<0.6% of tokens) to train. Extends
+  # HRM's RoPE window past the pretrained 4096 ceiling.
+  max_length: 8192
   drop_longer: true
 
 training:

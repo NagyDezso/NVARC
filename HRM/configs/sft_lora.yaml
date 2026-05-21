@@ -2,7 +2,7 @@ model:
   name_or_path: sapientinc/HRM-Text-1B
   dtype: bfloat16
   trust_remote_code: true
-  attn_implementation: flex_attention  # flash_attention_2 is incompatible with HRM's prefix_lm 4-D mask
+  attn_implementation: flex_attention
   gradient_checkpointing: true
 
   # PEFT / LoRA. Set enabled=false for full fine-tune.
@@ -31,7 +31,11 @@ data:
     - data/hrm_v1/nvarc_training
     - data/hrm_v1/nvarc_full
   val_dataset_path: data/hrm_v1/arc2_evaluation6
-  max_length: 4096
+  # Context-extension SFT: 8192 keeps 98.5% of samples / 99.4% of token mass;
+  # positions past it are too data-starved (<0.6% of tokens) to train. Extends
+  # HRM's RoPE window past the pretrained 4096 ceiling. prepare_data already
+  # trims oldest demo pairs to fit, so almost nothing is dropped here.
+  max_length: 8192
   # Length to which prompt+response is packed; samples longer than this are dropped.
   drop_longer: true
 
