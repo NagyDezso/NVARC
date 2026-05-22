@@ -67,6 +67,7 @@ uv run --project HRM python HRM/prepare_tokenizer.py \
 uv run --project HRM python HRM/prepare_data.py \
     --in_dir data/grids_v15 \
     --out_dir data/hrm_v1_small \
+    --tokenizer models/HRM-Text-1B-arc \
     --max_per_subset 12000 \
     --max_length 8192
 
@@ -74,7 +75,7 @@ uv run --project HRM python HRM/prepare_data.py \
 uv run --project HRM python HRM/smoke_test.py
 
 # 5. SFT — single GPU. Pick a config (sft_lora / sft_full_small / sft_full).
-uv run --project HRM python HRM/train_sft.py --config HRM/configs/sft_full_small.yaml
+uv run --project HRM python HRM/train_sft.py --config HRM/configs/sft_full.yaml
 
 # 6. Inference — per-puzzle solver (TTT → turbo-DFS → scoring → selection).
 uv run --project HRM python HRM/run_inference.py \

@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 from datasets import load_from_disk, concatenate_datasets
 from omegaconf import OmegaConf
@@ -102,6 +103,53 @@ class PrefixLMCollator:
             "attention_mask": torch.tensor(attention_mask, dtype=torch.long),
             "labels":         torch.tensor(labels,         dtype=torch.long),
         }
+
+
+def preprocess_logits_for_metrics(logits, labels):
+    """Reduce eval logits to argmax token ids before they accumulate.
+
+    Trainer otherwise holds the full [n, seq, vocab] float logits for every
+    eval batch — gigabytes at seq 8192. We only need the predicted token id,
+    so collapse the vocab axis here and let Trainer accumulate int ids.
+    """
+    if isinstance(logits, (tuple, list)):
+        logits = logits[0]
+    return logits.argmax(dim=-1)
+
+
+def compute_metrics(eval_pred):
+    """Teacher-forced accuracy on the response (target) tokens.
+
+    Not real generative ARC pass@2 — the gold prefix is fed at every step, so
+    these numbers are optimistic. But they need no decoding and give a sharp
+    per-eval progress curve that plain loss does not.
+
+      * token_acc  — fraction of response tokens whose argmax == gold.
+      * grid_exact — fraction of eval rows where *every* response token is
+                     correct, i.e. the whole serialized grid (+ EOS) matches.
+
+    The model shifts internally (ForCausalLMLoss), so logits[t] predicts token
+    t+1: we compare predictions[:-1] against labels[1:].
+    """
+    preds, labels = eval_pred
+    preds = np.asarray(preds)
+    labels = np.asarray(labels)
+
+    preds = preds[:, :-1]
+    labels = labels[:, 1:]
+
+    mask = labels != -100
+    correct = (preds == labels) & mask
+
+    n_tokens = int(mask.sum())
+    token_acc = float(correct.sum()) / n_tokens if n_tokens else 0.0
+
+    row_has_target = mask.any(axis=1)
+    row_all_correct = (correct.sum(axis=1) == mask.sum(axis=1)) & row_has_target
+    n_rows = int(row_has_target.sum())
+    grid_exact = float(row_all_correct.sum()) / n_rows if n_rows else 0.0
+
+    return {"token_acc": token_acc, "grid_exact": grid_exact}
 
 
 def load_split(paths) -> Any:
@@ -197,6 +245,9 @@ def main() -> None:
             logging_steps=cfg.training.logging_steps,
             eval_strategy="steps",
             eval_steps=cfg.training.eval_steps,
+            # Offload eval predictions to CPU every few batches so the
+            # accumulated argmax tensors don't pin GPU memory during eval.
+            eval_accumulation_steps=8,
             save_strategy="steps",
             save_steps=cfg.training.save_steps,
             save_total_limit=cfg.training.save_total_limit,
@@ -220,6 +271,8 @@ def main() -> None:
         eval_dataset=eval_ds,
         data_collator=collator,
         callbacks=callbacks,
+        compute_metrics=compute_metrics,
+        preprocess_logits_for_metrics=preprocess_logits_for_metrics,
     )
 
     # --resume: True -> let Trainer auto-find the latest checkpoint in

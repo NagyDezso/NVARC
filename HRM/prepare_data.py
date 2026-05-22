@@ -7,7 +7,7 @@ Output: HF datasets with columns ``input_ids``, ``token_type_ids``, ``labels``,
         ``length``, ``puzzle_name``.
 
 Rows longer than ``--max_length`` have their oldest demonstration pairs
-trimmed (via ``serialize.fit_sample``) until they fit; the supervised target
+trimmed (via ``serialize.fit_blocks``) until they fit; the supervised target
 is never dropped. A row is only discarded if its target pair alone overflows.
 
 Usage:
@@ -38,25 +38,48 @@ from pathlib import Path
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 from datasets import load_from_disk
+from serialize import (DEFAULT_CONDITION, TURN_END_TOKEN, TURN_START_TOKEN,
+                       encode_blocks, fit_blocks)
 from transformers import AutoTokenizer
-
-from serialize import fit_sample, DEFAULT_CONDITION
 
 
 def _tokenize_batch(batch: dict, tokenizer, max_length: int) -> dict:
     """``datasets.map`` worker: tokenize a batch of rows.
 
-    Runs once per shard in each ``num_proc`` worker process. ``fit_sample``
-    drops oldest demonstration pairs until the row fits ``max_length``;
-    ``n_demos_dropped`` records how many were trimmed. A row whose target pair
-    alone overflows is marked with ``length = max_length + 1`` and empty
-    tensors, and is filtered out downstream.
+    Runs once per shard in each ``num_proc`` worker process. Every message's
+    ``content`` across the whole batch is flattened and tokenized in a single
+    batched call -- this amortizes the fast tokenizer's per-call FFI overhead
+    and means trimming a row to ``max_length`` (``fit_blocks`` drops oldest
+    demo pairs) is list slicing rather than re-tokenization.
+
+    ``n_demos_dropped`` records how many demo pairs were trimmed. A row whose
+    target pair alone overflows is marked with ``length = max_length + 1`` and
+    empty tensors, and is filtered out downstream.
     """
+    im_start = tokenizer.convert_tokens_to_ids(TURN_START_TOKEN)
+    im_end = tokenizer.convert_tokens_to_ids(TURN_END_TOKEN)
+    eos_id = tokenizer.eos_token_id
+    cond_ids = tokenizer.encode(DEFAULT_CONDITION, add_special_tokens=False)
+
+    # Flatten every message content into one list, tokenize in a single Rust
+    # call, then slice it back per row. `flat_lens` records each row's message
+    # count so we can recover its slice.
+    all_messages = batch["messages"]
+    flat_texts = [m["content"] for messages in all_messages for m in messages]
+    flat_lens = [len(messages) for messages in all_messages]
+    flat_ids = tokenizer(flat_texts, add_special_tokens=False)["input_ids"] \
+        if flat_texts else []
+
     out = {"input_ids": [], "token_type_ids": [], "labels": [],
            "length": [], "n_demos_dropped": []}
-    for messages in batch["messages"]:
-        sample, n_demos_dropped = fit_sample(
-            messages, tokenizer, DEFAULT_CONDITION, max_length)
+    pos = 0
+    for k in flat_lens:
+        per_msg_ids = flat_ids[pos:pos + k]
+        pos += k
+        demo_blocks, final_prefix, final_target = encode_blocks(
+            per_msg_ids, cond_ids, im_start, im_end, eos_id)
+        sample, n_demos_dropped = fit_blocks(
+            demo_blocks, final_prefix, final_target, max_length)
         out["n_demos_dropped"].append(n_demos_dropped)
         if sample is None:
             out["input_ids"].append([])
@@ -90,9 +113,8 @@ def process_subset(
         ds = ds.shuffle(seed=seed).select(range(max_per_subset))
         print(f"[{in_path.name}] capped to {len(ds)} rows (--max_per_subset)")
 
-    # Tokenize in parallel: `num_proc` worker processes, each batch-encoding
-    # rows. The expensive part is `encode_sample`; `datasets.map` shards the
-    # table across processes and caches the result on disk.
+    # Tokenize in parallel: `num_proc` worker processes each batch-encode rows;
+    # `datasets.map` shards the table across processes and caches the result.
     ds = ds.map(
         _tokenize_batch,
         batched=True,
@@ -102,10 +124,10 @@ def process_subset(
         desc=f"tokenize {in_path.name}",
     )
 
-    # `fit_sample` trims oldest demos to fit; a row over max_length here is one
-    # whose target pair alone overflows. Report trims and the rare true drops.
-    lengths = ds["length"]
-    demos_dropped = ds["n_demos_dropped"]
+    # Read the bookkeeping columns as plain lists for the keep/trim scan.
+    cols = ds.select_columns(["length", "n_demos_dropped"]).to_dict()
+    lengths = cols["length"]
+    demos_dropped = cols["n_demos_dropped"]
     n_total = len(lengths)
     keep_idx = [i for i, n in enumerate(lengths) if n <= max_length]
     n_dropped = n_total - len(keep_idx)
@@ -121,7 +143,9 @@ def process_subset(
               f"({100.0 * n_dropped / n_total:.1f}%) whose target pair alone "
               f"exceeds max_length={max_length}")
 
-    ds = ds.select(keep_idx).remove_columns("n_demos_dropped")
+    if n_dropped:
+        ds = ds.select(keep_idx)
+    ds = ds.remove_columns("n_demos_dropped")
     out_path.mkdir(parents=True, exist_ok=True)
     ds.save_to_disk(str(out_path))
     print(f"[{in_path.name}] wrote {len(ds)} rows -> {out_path}")

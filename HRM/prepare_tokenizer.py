@@ -313,11 +313,10 @@ done. cut model written to: {args.out_dir}
 
 It is a drop-in replacement for the base model — the tokenizer and weights are
 both renumbered to the {new_vocab_size}-token ARC vocabulary, so no code needs
-to change. Use it with:
+to change. Point downstream tooling at it:
 
-  --model {args.out_dir}
-
-for HRM/train_sft.py and HRM/run_inference.py.
+  HRM/train_sft.py      set  model.name_or_path: {args.out_dir}  in the config
+  HRM/run_inference.py  pass --base {args.out_dir}
 """)
 
 

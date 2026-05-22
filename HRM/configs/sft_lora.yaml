@@ -1,5 +1,5 @@
 model:
-  name_or_path: sapientinc/HRM-Text-1B
+  name_or_path: models/HRM-Text-1B-arc   # vocab-cut model from prepare_tokenizer.py
   dtype: bfloat16
   trust_remote_code: true
   attn_implementation: flex_attention

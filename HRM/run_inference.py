@@ -37,7 +37,7 @@ def _run_worker(rank, queue, end_time, kwargs):
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--base", default="sapientinc/HRM-Text-1B")
+    ap.add_argument("--base", default=None)
     ap.add_argument("--checkpoint", default=None,
                     help="SFT checkpoint (LoRA adapter dir or full weights)")
     ap.add_argument("--tasks", required=True,
@@ -51,8 +51,7 @@ def main() -> None:
     ap.add_argument("--time-budget-hours", type=float, default=11.5)
     ap.add_argument("--num-workers", type=int, default=0,
                     help="0 = one worker per visible GPU (min 1)")
-    ap.add_argument("--max-seq-length", type=int, default=4096,
-                    help="HRM-Text-1B context window; do not exceed 4096")
+    ap.add_argument("--max-seq-length", type=int, default=8192)
     ap.add_argument("--decode-batch", type=int, default=4,
                     help="augmentations decoded together; lower it if the "
                          "recurrent KV cache OOMs")
@@ -61,6 +60,9 @@ def main() -> None:
     ap.add_argument("--ttt-aug", type=int, default=16)
     ap.add_argument("--limit", type=int, default=0,
                     help="solve only the first N puzzles (debugging)")
+    ap.add_argument("--keys", default=None,
+                    help="comma-separated puzzle keys to solve (debugging); "
+                         "overrides --limit")
     args = ap.parse_args()
 
     # Fail fast on bad paths: the run can take hours, so validate inputs
@@ -79,7 +81,13 @@ def main() -> None:
     else:
         with open(args.tasks) as f:
             keys = sorted(json.load(f).keys())
-    if args.limit:
+    if args.keys:
+        wanted = [k.strip() for k in args.keys.split(",") if k.strip()]
+        missing = [k for k in wanted if k not in keys]
+        if missing:
+            ap.error(f"--keys not present in --tasks: {missing}")
+        keys = wanted
+    elif args.limit:
         keys = keys[:args.limit]
     print(f"queued {len(keys)} puzzles")
 

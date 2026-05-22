@@ -150,6 +150,70 @@ def fit_sample(
     return sample, n_demos_dropped
 
 
+def encode_blocks(
+    per_msg_ids: Sequence[Sequence[int]],
+    cond_ids: Sequence[int],
+    im_start: int,
+    im_end: int,
+    eos_id: int,
+) -> tuple[list[list[int]], list[int], list[int]]:
+    """Assemble PrefixLM token blocks from already-tokenized message contents.
+
+    ``per_msg_ids`` is the token-id list of each message's ``content``, in
+    order, alternating user/assistant with an even count. This is the
+    re-tokenization-free core of ``encode_sample``: callers tokenize every
+    message exactly once (ideally batched) and reuse the result across trims.
+
+    Returns ``(demo_blocks, final_prefix, final_target)``:
+      * ``demo_blocks`` — one fully-formed token block per non-final
+        user/assistant pair (the trimmable in-context demonstrations);
+      * ``final_prefix`` — the last pair's prompt tokens (bidirectional);
+      * ``final_target`` — the last assistant message + eos (the response).
+    """
+    n = len(per_msg_ids)
+    assert n >= 2 and n % 2 == 0, \
+        f"need an even count of alternating user/assistant messages, got {n}"
+    demo_blocks: list[list[int]] = []
+    for i in range(0, n - 2, 2):
+        demo_blocks.append([im_start, *cond_ids, *per_msg_ids[i], im_end,
+                            *per_msg_ids[i + 1], eos_id])
+    final_prefix = [im_start, *cond_ids, *per_msg_ids[n - 2], im_end]
+    final_target = [*per_msg_ids[n - 1], eos_id]
+    return demo_blocks, final_prefix, final_target
+
+
+def fit_blocks(
+    demo_blocks: Sequence[Sequence[int]],
+    final_prefix: Sequence[int],
+    final_target: Sequence[int],
+    max_length: int | None = None,
+) -> tuple[Sample | None, int]:
+    """Build a ``Sample`` from ``encode_blocks`` output, dropping oldest demos.
+
+    Equivalent to ``fit_sample`` but operates on pre-tokenized blocks, so
+    trimming to ``max_length`` is list slicing rather than re-tokenization.
+    Returns ``(sample, n_demos_dropped)``; ``sample`` is None only if the
+    final pair alone exceeds ``max_length``.
+    """
+    tail = len(final_prefix) + len(final_target)
+    total = tail + sum(len(b) for b in demo_blocks)
+    n_dropped = 0
+    if max_length is not None:
+        while total > max_length and n_dropped < len(demo_blocks):
+            total -= len(demo_blocks[n_dropped])
+            n_dropped += 1
+        if total > max_length:
+            return None, n_dropped
+    prompt_ids = [t for b in demo_blocks[n_dropped:] for t in b]
+    prompt_ids.extend(final_prefix)
+    target_ids = list(final_target)
+    return Sample(
+        input_ids=prompt_ids + target_ids,
+        token_type_ids=[1] * len(prompt_ids) + [0] * len(target_ids),
+        labels=[-100] * len(prompt_ids) + target_ids,
+    ), n_dropped
+
+
 def build_sample(
     messages: Sequence[dict],
     tokenizer,
