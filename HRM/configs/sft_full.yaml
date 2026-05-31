@@ -1,38 +1,19 @@
 ## Full fine-tune of HRM-Text-1B on the COMPLETE ~3.2M-sample dataset,
 ## single 24 GB GPU (e.g. RTX 4090).
 ##
-## A full epoch here is weeks of 4090 time. This config is built to be run
-## open-ended and stopped whenever you like: a checkpoint is written every
-## save_steps, and the LR schedule is constant (no decay) so any checkpoint is
-## a valid finished model. For a fixed ~1-2 day budget use sft_full_small.yaml
-## instead.
-##
-## Differs from sft_lora.yaml in two ways:
-##   * lora.enabled: false        -> every weight is trained
-##   * optim: adamw_bnb_8bit      -> int8 optimizer state (2 GB instead of 8 GB)
-##
-## Setup:                     uv sync --project HRM
-## Run:                       uv run --project HRM python HRM/train_sft.py \
-##                                --config HRM/configs/sft_full.yaml
-## Stop:                      Ctrl+C (lose at most save_steps of progress).
-## Resume:                    add --resume  (auto-finds the latest checkpoint).
-##
-## Memory budget (bf16, bs 1, grad-ckpt on):
-##   weights 2 GB + grads 2 GB + 8-bit Adam 2 GB + activations.
-##   At seq 4096 activations are ~6-10 GB => ~12-16 GB. This config now runs
-##   the context-extension SFT at seq 8192 (~2x); activations scale roughly
-##   linearly, so expect to approach or exceed 24 GB -- drop batch/seq or move
-##   to a larger GPU if it OOMs.
+## Resume the batch-256 checkpoint and anneal with cosine:
+##   uv run --project HRM python HRM/train_sft.py \
+##       --config HRM/configs/sft_full.yaml --resume
 
 model:
-  name_or_path: models/HRM-Text-1B-arc   # vocab-cut model from prepare_tokenizer.py
+  name_or_path: models/HRM-Text-1B-arc
   dtype: bfloat16
   trust_remote_code: true
   attn_implementation: flex_attention
-  gradient_checkpointing: true            # required for full FT to fit
+  gradient_checkpointing: true
 
   lora:
-    enabled: false   # <-- full fine-tune
+    enabled: false
 
 data:
   train_dataset_path:
@@ -43,9 +24,6 @@ data:
     - data/hrm_v1/nvarc_training
     - data/hrm_v1/nvarc_full
   val_dataset_path: data/hrm_v1/arc2_evaluation6
-  # Context-extension SFT: 8192 keeps 98.5% of samples / 99.4% of token mass;
-  # positions past it are too data-starved (<0.6% of tokens) to train. Extends
-  # HRM's RoPE window past the pretrained 4096 ceiling.
   max_length: 8192
   drop_longer: true
 
@@ -53,32 +31,21 @@ training:
   output_dir: checkpoints/hrm-arc-full
   seed: 42
   num_train_epochs: 1
-  max_steps: -1
+  max_steps: 2400
   per_device_train_batch_size: 1
   per_device_eval_batch_size: 1
-  # Effective batch 256 (= bs1 x grad-accum 256) matches the NVARC production
-  # run (run_sft_4b.sh: train_global_batch_size=256). Accumulation is free on
-  # memory — it just trades optimizer-step frequency for gradient quality.
   gradient_accumulation_steps: 256
-  # LR scaled up with the 8x larger effective batch (was 1e-5 @ batch 32).
-  # 5e-5 is conservative vs production's 1e-4 since HRM is smaller + recurrent.
   learning_rate: 5.0e-5
   min_lr: 1.0e-7
   weight_decay: 0.1
   warmup_steps: 200
-  # A full epoch over ~3.2M samples is weeks on a 4090, so this run is meant
-  # to be stopped early (Ctrl+C; a checkpoint lands every save_steps). A
-  # constant LR means any stopping point is a valid endpoint — there is no
-  # decay schedule left half-finished. To resume:  --resume
-  # If you instead set a hard budget, switch to lr_scheduler_type: cosine and
-  # set max_steps to that budget.
-  lr_scheduler_type: constant_with_warmup
+  lr_scheduler_type: cosine
   max_grad_norm: 0.5
-  logging_steps: 10
-  eval_steps: 200
-  save_steps: 200
-  save_total_limit: 3
+  logging_steps: 5
+  eval_steps: 50
+  save_steps: 25
+  save_total_limit: 5
   bf16: true
-  optim: adamw_bnb_8bit   # int8 optimizer state; needs bitsandbytes (Linux/macOS)
-  report_to: wandb   # needs the wandb extra + `wandb login` (or WANDB_MODE=offline)
+  optim: adamw_bnb_8bit
+  report_to: wandb
   run_name: hrm-arc-sft-full

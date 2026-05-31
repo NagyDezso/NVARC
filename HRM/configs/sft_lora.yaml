@@ -46,19 +46,16 @@ training:
   max_steps: -1
   per_device_train_batch_size: 1
   per_device_eval_batch_size: 1
-  # Effective batch 256 (= bs1 x grad-accum 256) matches the NVARC production
-  # run (run_sft_4b.sh: train_global_batch_size=256).
-  gradient_accumulation_steps: 256
-  # LoRA tolerates a higher LR than full FT; 1e-4 stays fine at batch 256.
-  learning_rate: 1.0e-4
+  gradient_accumulation_steps: 32
+  learning_rate: 3.0e-5
   min_lr: 1.0e-7
   weight_decay: 0.1
-  warmup_steps: 200
+  warmup_steps: 1000
   lr_scheduler_type: linear
   max_grad_norm: 0.5
   logging_steps: 10
-  eval_steps: 200
-  save_steps: 200
+  eval_steps: 1000
+  save_steps: 1000
   save_total_limit: 3
   bf16: true
   optim: adamw_torch
