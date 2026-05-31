@@ -4,7 +4,7 @@
 ## Prepare the data first (mini comes in near-full, the rest cap at 33k ->
 ## ~195k samples after drop_longer):
 ##   uv run --project HRM python HRM/prepare_data.py \
-##       --in_dir data/grids_v15 --out_dir data/hrm_v1_small --max_per_subset 33000
+##       --in_dir data/grids_v15 --out_dir data/hrm_v1_small --max_per_subset 33000 --max_length 4096
 ##
 ## Then:
 ##   uv run --project HRM python HRM/train_sft.py \
@@ -29,7 +29,7 @@ data:
     - data/hrm_v1_small/nvarc_training
     - data/hrm_v1_small/nvarc_full
   val_dataset_path: data/hrm_v1_small/arc2_evaluation6
-  max_length: 8192
+  max_length: 4096
   drop_longer: true
 
 training:
@@ -37,9 +37,9 @@ training:
   seed: 42
   num_train_epochs: 2
   max_steps: -1
-  per_device_train_batch_size: 1
-  per_device_eval_batch_size: 1
-  gradient_accumulation_steps: 32
+  per_device_train_batch_size: 2
+  per_device_eval_batch_size: 4
+  gradient_accumulation_steps: 16
   learning_rate: 1.0e-5
   min_lr: 1.0e-7
   weight_decay: 0.1

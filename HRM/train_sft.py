@@ -117,39 +117,93 @@ def preprocess_logits_for_metrics(logits, labels):
     return logits.argmax(dim=-1)
 
 
-def compute_metrics(eval_pred):
-    """Teacher-forced accuracy on the response (target) tokens.
+def build_structure_ids(tokenizer) -> set[int]:
+    """Token ids that carry grid *structure* rather than cell colour.
 
-    Not real generative ARC pass@2 — the gold prefix is fed at every step, so
-    these numbers are optimistic. But they need no decoding and give a sharp
-    per-eval progress curve that plain loss does not.
+    Grids serialize as one digit per cell, rows joined by '\\n' (serialize.py).
+    So inside a target span the colours are the digit tokens and everything
+    else is structure: row separators ('\\n'), the turn-end marker and EOS. We
+    flag a token as structure if its decoded form contains a newline, plus the
+    end tokens explicitly. Used by compute_metrics to split the error rate into
+    "wrong colour" vs "wrong layout". (A token merging a digit with a newline
+    would land in 'structure' — acceptable for a coarse split.)
+    """
+    ids: set[int] = set()
+    im_end = tokenizer.convert_tokens_to_ids("<|im_end|>")
+    if im_end is not None and im_end >= 0:
+        ids.add(int(im_end))
+    if tokenizer.eos_token_id is not None:
+        ids.add(int(tokenizer.eos_token_id))
+    for tid in range(len(tokenizer)):
+        if "\n" in tokenizer.decode([tid]):
+            ids.add(int(tid))
+    return ids
 
-      * token_acc  — fraction of response tokens whose argmax == gold.
-      * grid_exact — fraction of eval rows where *every* response token is
-                     correct, i.e. the whole serialized grid (+ EOS) matches.
+
+def make_compute_metrics(structure_ids: set[int]):
+    """Build the eval-metric fn, closing over the structure-token id set.
+
+    Teacher-forced accuracy on the response (target) tokens. Not real
+    generative ARC pass@2 — the gold prefix is fed at every step, so these
+    numbers are optimistic. But they need no decoding and give a sharp per-eval
+    progress curve that plain loss does not.
+
+      * token_acc        — fraction of response tokens whose argmax == gold.
+      * grid_exact       — fraction of eval rows where *every* response token is
+                           correct (the whole serialized grid + EOS matches).
+      * token_acc_color  — accuracy on cell-colour (digit) tokens only.
+      * token_acc_struct — accuracy on structure tokens (row breaks / im_end /
+                           EOS) only. Splits a 3.5%/token error into "wrong
+                           colour" vs "wrong layout".
+      * token_acc_q1..q4 — accuracy by quartile of each grid's own length;
+                           q1=first cells, q4=last. q4 << q1 => the model
+                           degrades late in long grids.
 
     The model shifts internally (ForCausalLMLoss), so logits[t] predicts token
     t+1: we compare predictions[:-1] against labels[1:].
     """
-    preds, labels = eval_pred
-    preds = np.asarray(preds)
-    labels = np.asarray(labels)
+    struct_arr = np.array(sorted(structure_ids), dtype=np.int64)
 
-    preds = preds[:, :-1]
-    labels = labels[:, 1:]
+    def compute_metrics(eval_pred):
+        preds, labels = eval_pred
+        preds = np.asarray(preds)[:, :-1]
+        labels = np.asarray(labels)[:, 1:]
 
-    mask = labels != -100
-    correct = (preds == labels) & mask
+        mask = labels != -100
+        correct = (preds == labels) & mask
 
-    n_tokens = int(mask.sum())
-    token_acc = float(correct.sum()) / n_tokens if n_tokens else 0.0
+        n_tokens = int(mask.sum())
+        token_acc = float(correct.sum()) / n_tokens if n_tokens else 0.0
 
-    row_has_target = mask.any(axis=1)
-    row_all_correct = (correct.sum(axis=1) == mask.sum(axis=1)) & row_has_target
-    n_rows = int(row_has_target.sum())
-    grid_exact = float(row_all_correct.sum()) / n_rows if n_rows else 0.0
+        row_has_target = mask.any(axis=1)
+        row_all_correct = (correct.sum(axis=1) == mask.sum(axis=1)) & row_has_target
+        n_rows = int(row_has_target.sum())
+        grid_exact = float(row_all_correct.sum()) / n_rows if n_rows else 0.0
 
-    return {"token_acc": token_acc, "grid_exact": grid_exact}
+        metrics = {"token_acc": token_acc, "grid_exact": grid_exact}
+
+        def acc_over(sel) -> float:
+            n = int(sel.sum())
+            return float((correct & sel).sum()) / n if n else 0.0
+
+        # Structure (row breaks / im_end / EOS) vs colour (digit) tokens.
+        is_struct = np.isin(labels, struct_arr) & mask
+        metrics["token_acc_struct"] = acc_over(is_struct)
+        metrics["token_acc_color"] = acc_over(mask & ~is_struct)
+
+        # Per-grid positional quartiles: rank each target token within its own
+        # row's target span, normalise to [0,1), bucket into 4. Catches late-
+        # grid degradation independent of how long each grid is.
+        col_rank = np.cumsum(mask, axis=1) - 1                 # 0-based rank in row
+        row_counts = np.maximum(mask.sum(axis=1, keepdims=True), 1)
+        rel = col_rank / row_counts                            # [0,1) on masked toks
+        bucket = np.clip((rel * 4).astype(np.int64), 0, 3)
+        for q in range(4):
+            metrics[f"token_acc_q{q + 1}"] = acc_over(mask & (bucket == q))
+
+        return metrics
+
+    return compute_metrics
 
 
 def load_split(paths) -> Any:
@@ -208,6 +262,9 @@ def main() -> None:
     if pad_id is None:
         pad_id = tokenizer.convert_tokens_to_ids("<|endoftext|>")
     print(f"pad_token_id = {pad_id}, vocab_size = {len(tokenizer)}")
+
+    structure_ids = build_structure_ids(tokenizer)
+    print(f"structure tokens (row breaks / im_end / eos): {len(structure_ids)} ids")
 
     model = build_model(cfg, tokenizer)
 
@@ -271,7 +328,7 @@ def main() -> None:
         eval_dataset=eval_ds,
         data_collator=collator,
         callbacks=callbacks,
-        compute_metrics=compute_metrics,
+        compute_metrics=make_compute_metrics(structure_ids),
         preprocess_logits_for_metrics=preprocess_logits_for_metrics,
     )
 

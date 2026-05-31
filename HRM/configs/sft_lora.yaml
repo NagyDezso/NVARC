@@ -31,11 +31,9 @@ data:
     - data/hrm_v1/nvarc_training
     - data/hrm_v1/nvarc_full
   val_dataset_path: data/hrm_v1/arc2_evaluation6
-  # Context-extension SFT: 8192 keeps 98.5% of samples / 99.4% of token mass;
-  # positions past it are too data-starved (<0.6% of tokens) to train. Extends
-  # HRM's RoPE window past the pretrained 4096 ceiling. prepare_data already
-  # trims oldest demo pairs to fit, so almost nothing is dropped here.
-  max_length: 8192
+  # 4096 = HRM's pretrained RoPE window; ARC eval/test all fit under it, so no
+  # context extension is needed. prepare_data trims oldest demo pairs to fit.
+  max_length: 4096
   # Length to which prompt+response is packed; samples longer than this are dropped.
   drop_longer: true
 
@@ -44,9 +42,9 @@ training:
   seed: 42
   num_train_epochs: 1
   max_steps: -1
-  per_device_train_batch_size: 1
-  per_device_eval_batch_size: 1
-  gradient_accumulation_steps: 32
+  per_device_train_batch_size: 2
+  per_device_eval_batch_size: 4
+  gradient_accumulation_steps: 16
   learning_rate: 3.0e-5
   min_lr: 1.0e-7
   weight_decay: 0.1
