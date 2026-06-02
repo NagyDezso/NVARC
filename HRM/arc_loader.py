@@ -429,10 +429,14 @@ class ArcDataset:
         for k, v in results.items():
             base_id, base_nr = k.split("_")
             target_dict = submission[base_id][int(base_nr)]
-            for i, g in enumerate(v[: len(target_dict)]):
-                target_dict[f"attempt_{i + 1}"] = (
-                    g.tolist() if hasattr(g, "tolist") else g
-                )
+            guesses = [g.tolist() if hasattr(g, "tolist") else g for g in v]
+            # Always fill both attempts: if fewer guesses are available, repeat
+            # the last one rather than leaving a wasted default (e.g. [[0]]).
+            for i in range(len(target_dict)):
+                if i < len(guesses):
+                    target_dict[f"attempt_{i + 1}"] = guesses[i]
+                elif guesses:
+                    target_dict[f"attempt_{i + 1}"] = guesses[-1]
 
     def validate_submission(self, submission):
         assert self.is_orig, "Must be run on the original dataset."
