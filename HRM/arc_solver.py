@@ -340,7 +340,7 @@ def build_lora(model, r=256, alpha=32, dropout=0.0,
 
 def test_time_train(model, tokenizer, formatter, puzzle_ds, *,
                     n_aug=16, lr=5e-5, max_length=4096, seed=1, device="cuda",
-                    end_time=float("inf")):
+                    end_time=float("inf"), early_stop_patience=3):
     """Fine-tune the (already LoRA-wrapped) model on augmented demo pairs.
 
     Each augmented puzzle variant contributes one PrefixLM sample: its train
@@ -379,6 +379,8 @@ def test_time_train(model, tokenizer, formatter, puzzle_ds, *,
     rng = random.Random(seed)
     order = list(range(total))
     rng.shuffle(order)
+    # Early stop once the smoothed loss stops improving, after >= half the steps.
+    ema, best, stale, min_steps = None, float("inf"), 0, total // 2
     for step, idx in enumerate(order):
         if time.time() >= end_time:   # per-puzzle / global deadline hit
             break
@@ -399,6 +401,14 @@ def test_time_train(model, tokenizer, formatter, puzzle_ds, *,
         opt.zero_grad(set_to_none=True)
         if step + 1 >= warmup:
             sched.step()
+        loss_val = out.loss.item()
+        ema = loss_val if ema is None else 0.8 * ema + 0.2 * loss_val
+        if ema < best - 1e-3:
+            best, stale = ema, 0
+        else:
+            stale += 1
+        if early_stop_patience and step + 1 >= min_steps and stale >= early_stop_patience:
+            break
 
     # Decoding needs the KV cache, which checkpointing disables.
     model.gradient_checkpointing_disable()
