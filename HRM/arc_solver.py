@@ -340,7 +340,7 @@ def build_lora(model, r=256, alpha=32, dropout=0.0,
 
 def test_time_train(model, tokenizer, formatter, puzzle_ds, *,
                     n_aug=16, lr=5e-5, max_length=4096, seed=1, device="cuda",
-                    end_time=float("inf"), early_stop_patience=3):
+                    end_time=float("inf")):
     """Fine-tune the (already LoRA-wrapped) model on augmented demo pairs.
 
     Each augmented puzzle variant contributes one PrefixLM sample: its train
@@ -379,10 +379,8 @@ def test_time_train(model, tokenizer, formatter, puzzle_ds, *,
     rng = random.Random(seed)
     order = list(range(total))
     rng.shuffle(order)
-    # Early stop once the smoothed loss stops improving, after >= half the steps.
-    ema, best, stale, min_steps = None, float("inf"), 0, total // 2
     for step, idx in enumerate(order):
-        if time.time() >= end_time:   # per-puzzle / global deadline hit
+        if time.time() >= end_time:   # global run deadline hit
             break
         s = samples[idx]
         for g in opt.param_groups:                       # linear warmup
@@ -401,14 +399,6 @@ def test_time_train(model, tokenizer, formatter, puzzle_ds, *,
         opt.zero_grad(set_to_none=True)
         if step + 1 >= warmup:
             sched.step()
-        loss_val = out.loss.item()
-        ema = loss_val if ema is None else 0.8 * ema + 0.2 * loss_val
-        if ema < best - 1e-3:
-            best, stale = ema, 0
-        else:
-            stale += 1
-        if early_stop_patience and step + 1 >= min_steps and stale >= early_stop_patience:
-            break
 
     # Decoding needs the KV cache, which checkpointing disables.
     model.gradient_checkpointing_disable()
@@ -556,8 +546,7 @@ def load_model_and_tokenizer(base, checkpoint=None, dtype=torch.bfloat16, device
 
 def worker(rank, queue, end_time, *, base, checkpoint, tasks_path,
            out_dir, max_seq_length=4096, decode_batch=4,
-           lora_r=256, ttt_lr=5e-5, ttt_aug=16, n_workers=1,
-           puzzle_budget=2700, puzzle_budget_min=600, device="cuda"):
+           lora_r=256, ttt_lr=5e-5, ttt_aug=16, device="cuda"):
     """Pull puzzle keys off `queue`, solve each, dump candidates to `out_dir`."""
     from peft import get_peft_model_state_dict, set_peft_model_state_dict
 
@@ -585,23 +574,13 @@ def worker(rank, queue, end_time, *, base, checkpoint, tasks_path,
             break
 
         t0 = time.time()
-        # Per-puzzle deadline: split the remaining wall-clock across the puzzles
-        # this worker still has to do, so every task is attempted. Bounded by
-        # [puzzle_budget_min, puzzle_budget] and the global deadline.
-        try:
-            q_left = queue.qsize()
-        except NotImplementedError:
-            q_left = 0
-        my_tasks_left = (q_left + n_workers - 1) // max(1, n_workers) + 1
-        fair = (end_time - t0) / my_tasks_left
-        deadline = min(end_time, t0 + min(puzzle_budget, max(puzzle_budget_min, fair)))
         print(f"[rank {rank}] {key}: TTT...", flush=True)
         set_peft_model_state_dict(model, {k: v.clone() for k, v in default_weights.items()})
         puzzle_ds = arc_test.change_keys([key])
 
         test_time_train(model, tokenizer, formatter, puzzle_ds,
                         n_aug=ttt_aug, lr=ttt_lr, max_length=max_seq_length,
-                        end_time=deadline, device=device)
+                        end_time=end_time, device=device)
 
         print(f"[rank {rank}] {key}: decoding "
               f"(TTT took {time.time() - t0:.1f}s)...", flush=True)
@@ -609,7 +588,7 @@ def worker(rank, queue, end_time, *, base, checkpoint, tasks_path,
             results = solve_puzzle(model, tokenizer, formatter, puzzle_ds,
                                    max_seq_length=max_seq_length,
                                    decode_batch=decode_batch,
-                                   end_time=deadline, device=device)
+                                   end_time=end_time, device=device)
         for subkey, candidates in results.items():
             with bz2.BZ2File(os.path.join(out_dir, subkey), "w") as f:
                 pickle.dump(candidates, f)

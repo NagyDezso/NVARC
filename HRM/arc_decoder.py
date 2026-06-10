@@ -98,6 +98,7 @@ class ArcDecoder:
         num_solved_keys = 0
         num_total_keys = 0
         correct_beam_scores = []
+        oracle_keys = set()   # test-keys with >=1 correct candidate (coverage)
 
         for basekey, basevalues in self.decoded_results.items():
             mult_key, mult_sub = basekey.split("_")
@@ -114,6 +115,7 @@ class ArcDecoder:
                     corr_str = "ALL_CORRECT"
                     num_solved_keys += 1
                     correct_beam_scores.append(beam_score)
+                    oracle_keys.add(basekey)
                 else:
                     corr_str = "bad_content"
                 if corr_str == "ALL_CORRECT":
@@ -129,6 +131,11 @@ class ArcDecoder:
             print(f" max correct beam score: {np.max(correct_beam_scores):8.5f}")
 
         num_puzzles = len(num_tasks_per_puzzle)
+        # Oracle coverage: upper bound on any selector — credit a test-key if
+        # *any* candidate is correct, scored like the acc lines below.
+        oracle_score = sum(1 / num_tasks_per_puzzle[k.split("_")[0]]
+                           for k in oracle_keys)
+        print(f" oracle: {oracle_score:5.1f}/{num_puzzles:3} (any candidate correct)")
         for selection_algorithm in selection_algorithms:
             name = selection_algorithm.__name__
             selected = self.run_selection_algo(selection_algorithm)
