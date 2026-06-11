@@ -58,6 +58,12 @@ def main() -> None:
     ap.add_argument("--lora-r", type=int, default=256)
     ap.add_argument("--ttt-lr", type=float, default=5e-5)
     ap.add_argument("--ttt-aug", type=int, default=16)
+    ap.add_argument("--decode-budget", type=float, default=0,
+                    help="per-puzzle DECODE-only wall-clock ceiling in seconds "
+                         "(0 = bounded only by the global deadline). TTT is never "
+                         "capped by this; solve_puzzle keeps whatever candidates "
+                         "it found before the cut. Use to stop one big grid from "
+                         "starving the queue (some puzzles decode for ~2h).")
     ap.add_argument("--limit", type=int, default=0,
                     help="solve only the first N puzzles (debugging)")
     ap.add_argument("--keys", default=None,
@@ -99,6 +105,7 @@ def main() -> None:
         out_dir=args.store, max_seq_length=args.max_seq_length,
         decode_batch=args.decode_batch, lora_r=args.lora_r,
         ttt_lr=args.ttt_lr, ttt_aug=args.ttt_aug,
+        decode_budget=args.decode_budget,
         device="cuda" if torch.cuda.is_available() else "cpu",
     )
 

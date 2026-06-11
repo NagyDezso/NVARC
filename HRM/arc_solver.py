@@ -546,7 +546,8 @@ def load_model_and_tokenizer(base, checkpoint=None, dtype=torch.bfloat16, device
 
 def worker(rank, queue, end_time, *, base, checkpoint, tasks_path,
            out_dir, max_seq_length=4096, decode_batch=4,
-           lora_r=256, ttt_lr=5e-5, ttt_aug=16, device="cuda"):
+           lora_r=256, ttt_lr=5e-5, ttt_aug=16, decode_budget=0,
+           device="cuda"):
     """Pull puzzle keys off `queue`, solve each, dump candidates to `out_dir`."""
     from peft import get_peft_model_state_dict, set_peft_model_state_dict
 
@@ -582,13 +583,23 @@ def worker(rank, queue, end_time, *, base, checkpoint, tasks_path,
                         n_aug=ttt_aug, lr=ttt_lr, max_length=max_seq_length,
                         end_time=end_time, device=device)
 
+        # Decode-only wall: cap how long *decoding* one puzzle may run, so a
+        # single big grid can't explode the turbo-DFS tree and starve the rest
+        # of the queue. TTT is never capped by this (it ran above under the
+        # global deadline only), and solve_puzzle returns whatever candidates it
+        # found before the cut -- so this bounds time without silently zeroing a
+        # puzzle the way a shared TTT+decode wall did. 0 == global deadline only.
+        decode_start = time.time()
+        decode_deadline = end_time
+        if decode_budget:
+            decode_deadline = min(end_time, decode_start + decode_budget)
         print(f"[rank {rank}] {key}: decoding "
-              f"(TTT took {time.time() - t0:.1f}s)...", flush=True)
+              f"(TTT took {decode_start - t0:.1f}s)...", flush=True)
         with torch.inference_mode():
             results = solve_puzzle(model, tokenizer, formatter, puzzle_ds,
                                    max_seq_length=max_seq_length,
                                    decode_batch=decode_batch,
-                                   end_time=end_time, device=device)
+                                   end_time=decode_deadline, device=device)
         for subkey, candidates in results.items():
             with bz2.BZ2File(os.path.join(out_dir, subkey), "w") as f:
                 pickle.dump(candidates, f)

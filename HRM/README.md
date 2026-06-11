@@ -69,7 +69,7 @@ uv run --project HRM python HRM/prepare_data.py \
     --out_dir data/hrm_v1_small \
     --tokenizer models/HRM-Text-1B-arc \
     --max_per_subset 12000 \
-    --max_length 8192
+    --max_length 4096
 
 # 4. Sanity-check the model loads + forward + generate works.
 uv run --project HRM python HRM/smoke_test.py
@@ -79,7 +79,7 @@ uv run --project HRM python HRM/train_sft.py --config HRM/configs/sft_full.yaml
 
 # 6. Inference — per-puzzle solver (TTT → turbo-DFS → scoring → selection).
 uv run --project HRM python HRM/run_inference.py \
-    --checkpoint checkpoints/hrm-arc \
+    --checkpoint checkpoints/hrm-arc-full \
     --tasks data/arc-prize-2025/arc-agi_evaluation_challenges.json \
     --solutions data/arc-prize-2025/arc-agi_evaluation_solutions.json \
     --out submission.json \
@@ -115,12 +115,3 @@ uv run --project HRM python HRM/run_inference.py \
   65,536-token vocab; ARC digit-grids use only a few dozen. Cutting it trims
   ~100M params off the tied embedding, shrinks the logits matmul, and makes the
   cut `embed_tokens`/`lm_head` small enough to LoRA the output head cheaply.
-- Hardware: the 24 GB GPU (e.g. RTX 4090) budgets below are for seq 4096. The
-  configs now run the context-extension SFT at seq 8192 (~2x), so activation
-  memory rises accordingly — expect to lower batch/seq or use a larger GPU.
-  No `accelerate launch` needed.
-  - **LoRA** (`configs/sft_lora.yaml`) — the easy default. ~8–12 GB total.
-  - **Full fine-tune** (`configs/sft_full.yaml`) — also fits, but *only* with
-    8-bit AdamW (`optim: adamw_bnb_8bit`, bitsandbytes — Linux/macOS): ~12–16 GB.
-    With plain `adamw_torch` the optimizer state alone is 8 GB and a run can
-    OOM when activations spike. Use ≥ 40 GB if you want plain fp32 Adam.
