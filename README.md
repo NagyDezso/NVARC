@@ -49,6 +49,10 @@ The scripts and instructions to train Tiny Recursive Models are in the [TRM](TRM
 
 The submission notebook is available on Kaggle [cpmpml/arc2-trm-v31](https://www.kaggle.com/code/cpmpml/arc2-trm-v31?scriptVersionId=278223801).
 
+## HRM-Text-1B
+
+In addition to the components above, this fork adapts the NVARC inference pipeline to use [sapientinc/HRM-Text-1B](https://huggingface.co/sapientinc/HRM-Text-1B), a hierarchical recurrent transformer, as the reasoning LM in place of the Qwen3-4B model from the ARChitects pipeline. The SDG and TRM components are reused unchanged. The model is trained with a PrefixLM objective and drives the same per-puzzle ARChitects-style solver (test-time fine-tuning, turbo-DFS decoding, augmentation scoring and selection). The code and full instructions are in the [HRM](HRM) folder, with details in [HRM/README.md](HRM/README.md).
+
 ## ARC AGI 2024
 
 We ran our winning solution on last year ARC AGI evaluation data. The code can be found in the [ARC-AGI1](ARC-AGI1) folder.
